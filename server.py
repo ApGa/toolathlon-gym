@@ -19,7 +19,6 @@ import asyncio
 import json
 import os
 import shutil
-import tempfile
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -55,6 +54,21 @@ CATALOG_DESC_MAX_CHARS = 160
 ALL_TOOL_SCHEMAS: dict[str, list[dict]] = {}
 if TOOL_SCHEMAS_FILE.exists():
     ALL_TOOL_SCHEMAS = json.loads(TOOL_SCHEMAS_FILE.read_text())
+
+
+# ── Server configuration ─────────────────────────────────────────────────────
+
+def _get_server_port() -> int:
+    raw_port = os.getenv("OPENREWARD_PORT") or os.getenv("PORT") or "8080"
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise ValueError(f"Invalid server port: {raw_port!r}") from exc
+
+    if not 1 <= port <= 65535:
+        raise ValueError(f"Server port must be between 1 and 65535: {port}")
+
+    return port
 
 
 # ── Template resolution (from original tool_servers.py) ──────────────────────
@@ -306,11 +320,16 @@ class ToolathlonGym(Environment):
 
     def _pg_env(self) -> dict[str, str]:
         """Env additions that point any subprocess at this session's DB."""
+        pythonpath_parts = ["/app/runtime_patches"]
+        existing_pythonpath = os.environ.get("PYTHONPATH")
+        if existing_pythonpath:
+            pythonpath_parts.append(existing_pythonpath)
         return {
             "PGHOST": "localhost",
             "PG_HOST": "localhost",
             "PGDATABASE": self._db_name,
             "PG_DATABASE": self._db_name,
+            "PYTHONPATH": os.pathsep.join(pythonpath_parts),
         }
 
     async def _psql(self, sql: str, *, dbname: str = "postgres") -> None:
@@ -719,4 +738,4 @@ class ToolathlonGym(Environment):
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    Server([ToolathlonGym]).run()
+    Server([ToolathlonGym]).run(port=_get_server_port())

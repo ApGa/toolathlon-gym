@@ -112,6 +112,7 @@ WORKDIR /app
 COPY tasks/ /app/tasks/
 COPY configs/ /app/configs/
 COPY db/ /app/db/
+COPY runtime_patches/ /app/runtime_patches/
 COPY server.py /app/server.py
 COPY discover_tools.py /app/discover_tools.py
 COPY entrypoint.sh /app/entrypoint.sh

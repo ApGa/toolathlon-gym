@@ -19,6 +19,25 @@ Toolathlon Gym is an ORS environment for evaluating multi-tool coordination capa
 
 Each task runs inside a Docker container with PostgreSQL, 25 MCP server implementations, Node.js 22, and Python 3.12. The ORS server runs alongside all services in a single container.
 
+## Self-Hosting
+
+Run the environment server on the default port:
+
+```bash
+docker run --rm -p 8080:8080 ghcr.io/apga/openreward-toolathlon-gym:latest
+```
+
+To use a different in-container port, set `OPENREWARD_PORT` and publish the same container port:
+
+```bash
+docker run --rm \
+  -e OPENREWARD_PORT=18080 \
+  -p 18080:18080 \
+  ghcr.io/apga/openreward-toolathlon-gym:latest
+```
+
+`OPENREWARD_PORT` is preferred over the generic `PORT` variable. If `OPENREWARD_PORT` is unset, the server falls back to `PORT`, then `8080`.
+
 ## License
 
 [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0).
