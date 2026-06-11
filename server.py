@@ -18,6 +18,7 @@ input_schema on demand via `get_tool_details` and invokes it via
 import asyncio
 import json
 import os
+import random
 import shutil
 from collections import defaultdict
 from datetime import datetime
@@ -69,6 +70,43 @@ def _get_server_port() -> int:
         raise ValueError(f"Server port must be between 1 and 65535: {port}")
 
     return port
+
+
+def _now() -> datetime:
+    """Wall-clock now, unless OPENREWARD_FROZEN_DATE pins the calendar date.
+
+    Many tasks (and the PG-backed 12306 server's `checkDate`) compare task
+    dates against "today". The benchmark was authored with a fixed reference
+    date, so once real wall-clock drifts past it those tasks become
+    unsolvable. Setting OPENREWARD_FROZEN_DATE=YYYY-MM-DD freezes the calendar
+    date the env reports (time-of-day still tracks the wall clock) so the
+    benchmark stays reproducible. The same env var is read by the 12306 MCP
+    server (it is inherited by every subprocess).
+    """
+    frozen = os.getenv("OPENREWARD_FROZEN_DATE")
+    if frozen:
+        try:
+            d = datetime.strptime(frozen.strip()[:10], "%Y-%m-%d").date()
+            return datetime.combine(d, datetime.now().time())
+        except ValueError:
+            pass
+    return datetime.now()
+
+
+# psql/Postgres errors that are transient under high concurrency (connection
+# exhaustion, startup races, template-in-use) and worth retrying with backoff
+# instead of failing the whole session setup.
+_TRANSIENT_PG_ERRORS = (
+    "too many clients",
+    "remaining connection slots",
+    "could not connect",
+    "connection refused",
+    "the database system is starting up",
+    "the database system is shutting down",
+    "is being accessed by other users",
+    "could not obtain lock",
+    "deadlock detected",
+)
 
 
 # ── Template resolution (from original tool_servers.py) ──────────────────────
@@ -233,15 +271,38 @@ class MCPBridge:
                     cwd=cwd,
                 )
                 mcp_proc = _MCPProcess(name, proc)
-                await asyncio.sleep(1.5)  # let server boot
 
-                if await mcp_proc.initialize():
+                # Readiness-poll instead of a fixed sleep. initialize() blocks
+                # up to its own timeout for the server's response, so under
+                # load a slow (node/uv) boot is tolerated without paying a
+                # flat per-server delay on the fast path. Retry a few times in
+                # case the process is still wiring up stdio.
+                ok = False
+                for attempt in range(4):
+                    if proc.returncode is not None:
+                        break  # process already exited; don't keep polling
+                    try:
+                        if await mcp_proc.initialize():
+                            ok = True
+                            break
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.5 * (attempt + 1))
+
+                if ok:
                     self._processes[name] = mcp_proc
                 else:
-                    print(f"[MCPBridge] WARNING: Failed to initialize {name}")
+                    detail = ""
+                    if proc.returncode is not None and proc.stderr is not None:
+                        try:
+                            err = await asyncio.wait_for(proc.stderr.read(2000), timeout=1)
+                            detail = f" (rc={proc.returncode}): {err.decode(errors='replace').strip()[:300]}"
+                        except Exception:
+                            detail = f" (rc={proc.returncode})"
+                    print(f"[MCPBridge] WARNING: Failed to initialize {name}{detail}", flush=True)
                     await mcp_proc.close()
             except Exception as e:
-                print(f"[MCPBridge] WARNING: Failed to launch {name}: {e}")
+                print(f"[MCPBridge] WARNING: Failed to launch {name}: {e}", flush=True)
 
     async def call_tool(self, tool_name: str, arguments: dict, *, server: str | None = None) -> str:
         candidates = self._tool_servers.get(tool_name) or []
@@ -306,8 +367,9 @@ class ToolathlonGym(Environment):
         # can never see each other's mutations, even when sessions share a pod.
         self._db_name = f"s_{uuid4().hex[:16]}"
         self._task_config: dict = {}
-        self._launch_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self._launch_time_display = datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
+        _launch_dt = _now()
+        self._launch_time = _launch_dt.strftime("%Y-%m-%d %H:%M:%S")
+        self._launch_time_display = _launch_dt.strftime("%Y-%m-%d %H:%M:%S %A")
         self._mcp_bridge: MCPBridge | None = None
         # Build set of MCP tool names for routing in _call_tool. Keys are the
         # bare (unprefixed) tool names that MCPBridge dispatches against.
@@ -332,16 +394,29 @@ class ToolathlonGym(Environment):
             "PYTHONPATH": os.pathsep.join(pythonpath_parts),
         }
 
-    async def _psql(self, sql: str, *, dbname: str = "postgres") -> None:
-        proc = await asyncio.create_subprocess_exec(
-            "psql", "-U", "eigent", "-d", dbname, "-v", "ON_ERROR_STOP=1", "-c", sql,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env={**os.environ, "PGHOST": "localhost"},
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(f"psql failed ({proc.returncode}): {stderr.decode()[:500]}")
+    async def _psql(self, sql: str, *, dbname: str = "postgres", retries: int = 10) -> None:
+        # Retry transient failures (connection exhaustion, startup races,
+        # template-in-use) with exponential backoff + jitter. Under 128-wide
+        # concurrency a momentary "too many clients" on CREATE DATABASE must
+        # not kill the whole session — it just needs to wait its turn.
+        last_err = ""
+        for attempt in range(retries):
+            proc = await asyncio.create_subprocess_exec(
+                "psql", "-U", "eigent", "-d", dbname, "-v", "ON_ERROR_STOP=1", "-c", sql,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, "PGHOST": "localhost"},
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode == 0:
+                return
+            last_err = stderr.decode()[:500]
+            is_transient = any(s in last_err.lower() for s in _TRANSIENT_PG_ERRORS)
+            if not is_transient or attempt == retries - 1:
+                raise RuntimeError(f"psql failed ({proc.returncode}): {last_err}")
+            delay = min(0.5 * (2 ** attempt), 8.0) + random.uniform(0, 0.5)
+            await asyncio.sleep(delay)
+        raise RuntimeError(f"psql failed after {retries} attempts: {last_err}")
 
     async def setup(self):
         # Clone the seeded template into a fresh per-session DB. Done first so

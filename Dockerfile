@@ -1,16 +1,26 @@
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Base system deps (includes PostgreSQL server, not just client)
+# Base system deps (includes PostgreSQL server, not just client; nginx fronts
+# the in-container worker pool; software-properties-common enables deadsnakes)
 RUN apt-get update && apt-get install -y \
-    curl wget git ca-certificates gnupg \
-    python3 python3-pip rsync \
+    curl wget git ca-certificates gnupg software-properties-common \
+    python3 python3-pip rsync nginx \
     postgresql postgresql-client \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
     libcups2 libdrm2 libdbus-1-3 libatspi2.0-0 \
     libx11-6 libxcomposite1 libxdamage1 libxext6 \
     libxfixes3 libxrandr2 libgbm1 libxcb1 \
     libxkbcommon0 libpango-1.0-0 libcairo2 libasound2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# System Python 3.12 (deadsnakes) so /opt/venv is backed by an interpreter that
+# physically lives in the image. Building the venv from a uv-managed download
+# leaves a `cpython-3.12-...` alias symlink that can point at the build host's
+# HOME (e.g. /home/<user>/.local/share/uv/...), which then dangles under
+# enroot/pyxis. A system interpreter removes that whole class of breakage.
+RUN add-apt-repository -y ppa:deadsnakes/ppa && apt-get update && \
+    apt-get install -y python3.12 python3.12-venv python3.12-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # uv
@@ -23,8 +33,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g npm@10
 
-# Python venv with ORS + task dependencies
-RUN uv venv /opt/venv --python 3.12 && uv pip install --python /opt/venv/bin/python \
+# Python venv with ORS + task dependencies (built from the system 3.12 above)
+RUN uv venv /opt/venv --python /usr/bin/python3.12 --python-preference only-system && \
+    uv pip install --python /opt/venv/bin/python \
     "openreward>=0.1.95" \
     "mcp>=1.0.0" \
     "pydantic>=2.0" \
@@ -44,6 +55,14 @@ RUN uv venv /opt/venv --python 3.12 && uv pip install --python /opt/venv/bin/pyt
 ENV PATH="/opt/venv/bin:$PATH"
 ENV VIRTUAL_ENV="/opt/venv"
 ENV LOCAL_SERVERS_PATH=/opt/local_servers
+
+# Freeze "today" to the benchmark's authoring window. Seeded train data is keyed
+# to fixed dates (2026-03-10/12/15) and the 12306 server rejects past dates, so
+# without this the rail tasks are unsolvable once wall-clock drifts past them.
+# preprocess and evaluation both receive this same frozen launch_time, so
+# relative-date tasks stay internally consistent. Override per-run with
+# `-e OPENREWARD_FROZEN_DATE=YYYY-MM-DD` (or empty to use real wall-clock).
+ENV OPENREWARD_FROZEN_DATE=2026-03-08
 
 # Install Playwright browser
 RUN playwright install chromium || true
@@ -93,6 +112,22 @@ done && wait
 # yahoo-finance Toolathlon fork uses psycopg2 for PG-backed data
 RUN cd /opt/local_servers/yahoo-finance-mcp && uv add psycopg2-binary
 
+# Normalize any uv-managed python aliases to RELATIVE symlinks. The Python MCP
+# sub-servers run via `uv run`, which may create per-server venvs against a
+# uv-managed interpreter; if the alias `cpython-3.12-...-gnu` was recorded as an
+# absolute path into the build host's HOME it dangles at runtime. Re-point each
+# generic alias at its sibling versioned dir relatively so the image is
+# self-contained regardless of where it was built.
+RUN base="$HOME/.local/share/uv/python"; \
+    if [ -d "$base" ]; then \
+        for d in "$base"/cpython-3.*-linux-*-gnu; do \
+            [ -d "$d" ] || continue; \
+            v="$(basename "$d")"; \
+            gen="$(echo "$v" | sed -E 's/^(cpython-3\.[0-9]+)\.[0-9]+(-.*)$/\1\2/')"; \
+            if [ "$gen" != "$v" ]; then ln -sfn "$v" "$base/$gen"; fi; \
+        done; \
+    fi
+
 # Create the eigent superuser (peer auth as the postgres OS user).
 USER postgres
 RUN service postgresql start && \
@@ -106,6 +141,21 @@ RUN PG_HBA=$(find /etc/postgresql -name pg_hba.conf) && \
     sed -i 's/peer$/trust/' "$PG_HBA" && \
     sed -i 's/scram-sha-256$/trust/' "$PG_HBA" && \
     sed -i 's/md5$/trust/' "$PG_HBA"
+
+# High-concurrency Postgres tuning. With N workers each running 4-8 MCP server
+# subprocesses per session, the default max_connections=100 is exhausted almost
+# immediately under 128-wide rollouts ("sorry, too many clients already").
+# This is the baked default; entrypoint.sh can override max_connections at
+# runtime via OPENREWARD_PG_MAX_CONNECTIONS without a rebuild.
+RUN PG_CONF=$(find /etc/postgresql -name postgresql.conf) && { \
+        echo ""; \
+        echo "# --- toolathlon high-concurrency tuning ---"; \
+        echo "max_connections = 1000"; \
+        echo "shared_buffers = 512MB"; \
+        echo "work_mem = 8MB"; \
+        echo "max_locks_per_transaction = 256"; \
+        echo "listen_addresses = 'localhost'"; \
+    } >> "$PG_CONF"
 
 # Copy project files
 WORKDIR /app
