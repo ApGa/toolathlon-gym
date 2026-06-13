@@ -1,6 +1,7 @@
 // src/client.ts
 
 import axios, { AxiosInstance, AxiosError } from 'axios';
+import { PgCanvasRouter } from './pg-canvas-router.js';
 import { 
   CanvasCourse, 
   CanvasAssignment,
@@ -45,17 +46,25 @@ import {
 } from './types.js';
 
 export class CanvasClient {
-  private client: AxiosInstance;
+  private client: AxiosInstance | PgCanvasRouter;
   private baseURL: string;
   private token: string;
   private maxRetries: number = 3;
   private retryDelay: number = 1000;
+  private usePgRouter: boolean;
 
   constructor(token: string, domain: string, options?: { maxRetries?: number; retryDelay?: number }) {
     this.token = token;
     this.baseURL = `https://${domain}/api/v1`;
     this.maxRetries = options?.maxRetries ?? 3;
     this.retryDelay = options?.retryDelay ?? 1000;
+    this.usePgRouter = process.env.CANVAS_USE_PG_ROUTER !== '0';
+
+    if (this.usePgRouter) {
+      this.client = new PgCanvasRouter();
+      console.error('[Canvas API] Using Postgres-backed Toolathlon Canvas router');
+      return;
+    }
 
     this.client = axios.create({
       baseURL: this.baseURL,
@@ -70,8 +79,14 @@ export class CanvasClient {
   }
 
   private setupInterceptors(): void {
+    if (this.usePgRouter) {
+      return;
+    }
+
+    const client = this.client as AxiosInstance;
+
     // Request interceptor for logging
-    this.client.interceptors.request.use(
+    client.interceptors.request.use(
       (config) => {
         console.error(`[Canvas API] ${config.method?.toUpperCase()} ${config.url}`);
         return config;
@@ -83,7 +98,7 @@ export class CanvasClient {
     );
 
     // Response interceptor for pagination and retry logic
-    this.client.interceptors.response.use(
+    client.interceptors.response.use(
       async (response) => {
         const { headers, data } = response;
         const linkHeader = headers.link;
@@ -98,7 +113,7 @@ export class CanvasClient {
 
           while (nextUrl && pageCount < maxPages) {
             console.error(`[Canvas API] Fetching page ${pageCount + 1}...`);
-            const nextResponse = await this.client.get(nextUrl);
+            const nextResponse = await client.get(nextUrl);
             allData = [...allData, ...nextResponse.data];
             nextUrl = this.getNextPageUrl(nextResponse.headers.link);
             pageCount++;
@@ -125,7 +140,7 @@ export class CanvasClient {
           console.error(`[Canvas API] Retrying request (${config.__retryCount}/${this.maxRetries}) after ${delay}ms`);
           
           await this.sleep(delay);
-          return this.client.request(config);
+          return client.request(config);
         }
 
         // Transform error with better handling for non-JSON responses
@@ -956,6 +971,10 @@ export class CanvasClient {
     const uploadUrlResponse = await this.client.post(uploadEndpoint, uploadParams);
     const { upload_url, upload_params } = uploadUrlResponse.data;
 
+    if (this.usePgRouter) {
+      return uploadUrlResponse.data;
+    }
+
     // Step 2: Upload the file
     const formData = new FormData();
     Object.entries(upload_params).forEach(([key, value]) => {
@@ -1012,6 +1031,23 @@ export class CanvasClient {
     
     // Limit per_page to maximum of 20
     const limitedPerPage = Math.min(per_page, 20);
+
+    if (this.usePgRouter) {
+      const response = await this.client.get(`/accounts/${account_id}/users`, {
+        params: {
+          ...params,
+          page,
+          per_page: limitedPerPage
+        }
+      });
+
+      return {
+        users: response.data,
+        pagination: {
+          current_page: page
+        }
+      };
+    }
     
     // Create a new axios instance without interceptors for this specific request
     const { default: newAxios } = await import('axios');

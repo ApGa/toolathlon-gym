@@ -15,8 +15,10 @@
  */
 
 import { fork } from 'child_process';
+import { existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import * as playwright from 'playwright';
 import { z } from 'zod';
 import { defineTool } from './tool.js';
 
@@ -32,7 +34,26 @@ const install = defineTool({
   },
 
   handle: async (context, params, response) => {
-    const channel = context.config.browser?.launchOptions?.channel ?? context.config.browser?.browserName ?? 'chrome';
+    const browserName = context.config.browser?.browserName ?? 'chromium';
+    const browserType = playwright[browserName];
+    const executablePath = browserType.executablePath();
+    if (existsSync(executablePath)) {
+      response.addResult(`Browser '${browserName}' is already installed at ${executablePath}.`);
+      response.setIncludeTabs();
+      return;
+    }
+
+    if (process.env.TOOLATHLON_ALLOW_RUNTIME_BROWSER_INSTALL !== '1') {
+      response.addResult(
+        `Browser '${browserName}' was not found at ${executablePath}. ` +
+        `Runtime browser downloads are disabled in Toolathlon images; rebuild ` +
+        `the image so the Dockerfile installs the Node Playwright browser cache.`
+      );
+      response.setIncludeTabs();
+      return;
+    }
+
+    const channel = context.config.browser?.launchOptions?.channel ?? browserName ?? 'chrome';
     const cliUrl = import.meta.resolve('playwright/package.json');
     const cliPath = path.join(fileURLToPath(cliUrl), '..', 'cli.js');
     const child = fork(cliPath, ['install', channel], {

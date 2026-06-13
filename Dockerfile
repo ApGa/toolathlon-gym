@@ -86,6 +86,11 @@ RUN for dir in \
         echo "=== npm: $dir ===" && cd "$dir" && npm install && (npm run build 2>/dev/null || true) ) & \
 done && wait
 
+# Install the browser for the Node Playwright MCP package, not just the Python
+# playwright package in /opt/venv. Otherwise browser_install tries to download
+# at runtime, which is slow and often unavailable on HPC nodes.
+RUN cd /opt/local_servers/playwright-mcp && npx playwright install chromium
+
 # These servers need pg for their Toolathlon PG-backed forks
 RUN cd /opt/local_servers/woocommerce-mcp && npm install pg @types/pg && npm run build
 RUN cd /opt/local_servers/notion-mcp-server && npm install pg @types/pg && npm run build

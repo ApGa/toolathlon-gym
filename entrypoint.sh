@@ -14,7 +14,7 @@ set -e
 #
 # Tunables (env):
 #   OPENREWARD_PORT / PORT          public port nginx listens on (default 8080)
-#   OPENREWARD_WORKERS              worker count (default: clamp(nproc, 4..16))
+#   OPENREWARD_WORKERS              worker count (default: max(nproc, 4))
 #   OPENREWARD_WORKER_BASE_PORT     first internal worker port (default 8100)
 #   OPENREWARD_PG_MAX_CONNECTIONS   postgres max_connections (default 1000)
 #   OPENREWARD_FROZEN_DATE          freeze "today" as YYYY-MM-DD (rail/date tasks)
@@ -29,7 +29,11 @@ if ! [ "$WORKERS" -ge 1 ] 2>/dev/null; then
     n="$(nproc 2>/dev/null || echo 4)"
     WORKERS="$n"
     [ "$WORKERS" -lt 4 ] && WORKERS=4
-    [ "$WORKERS" -gt 16 ] && WORKERS=16
+fi
+
+if [ "$((BASE_PORT + WORKERS - 1))" -gt 65535 ]; then
+    echo "[entrypoint] invalid worker port range: base_port=${BASE_PORT} workers=${WORKERS}" >&2
+    exit 1
 fi
 
 echo "[entrypoint] public_port=${PUBLIC_PORT} workers=${WORKERS} base_port=${BASE_PORT} pg_max_connections=${PG_MAX_CONN} frozen_date=${OPENREWARD_FROZEN_DATE:-<wall-clock>}"

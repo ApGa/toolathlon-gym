@@ -38,6 +38,18 @@ docker run --rm \
 
 `OPENREWARD_PORT` is preferred over the generic `PORT` variable. If `OPENREWARD_PORT` is unset, the server falls back to `PORT`, then `8080`.
 
+For higher rollout concurrency, set the number of in-container ORS workers:
+
+```bash
+docker run --rm \
+  -e OPENREWARD_WORKERS=64 \
+  -e OPENREWARD_PG_MAX_CONNECTIONS=2000 \
+  -p 8080:8080 \
+  ghcr.io/apga/openreward-toolathlon-gym:latest
+```
+
+If `OPENREWARD_WORKERS` is unset, the container defaults to the host CPU count with a minimum of 4 workers. There is no fixed upper cap; make sure `OPENREWARD_PG_MAX_CONNECTIONS`, CPU, and memory are sized for the number of concurrent sessions.
+
 ## License
 
 [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0).
