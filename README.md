@@ -64,7 +64,18 @@ Tasks require coordinating 4-8 MCP servers per task across domains including You
 
 ## Reward Structure
 
-This is a multi-turn environment with script-based validation. The agent uses MCP tools and built-in tools to complete tasks, then calls `claim_done` to run the evaluation script. The reward is binary: 1.0 if all checks pass, 0.0 otherwise.
+This is a multi-turn environment with script-based validation. The agent uses MCP tools and built-in tools to complete tasks, then calls `claim_done` to run the evaluation script. By default, the reward is binary: 1.0 if the grader passes, 0.0 otherwise.
+
+To return fractional rewards from grader check counts where available, set:
+
+```bash
+docker run --rm \
+  -e OPENREWARD_REWARD_MODE=partial \
+  -p 8080:8080 \
+  ghcr.io/apga/openreward-toolathlon-gym:latest
+```
+
+Partial mode reads the grader result log or stdout summaries such as `total_passed/total_checks`, `passed/failed`, or `Overall: N/M checks passed`. If a grader only reports pass/fail, the server falls back to the binary reward for that task.
 
 ## Data
 

@@ -19,6 +19,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import shutil
 from collections import defaultdict
 from datetime import datetime
@@ -49,12 +50,209 @@ LOCAL_SERVERS = "/opt/local_servers"
 TOOL_SCHEMAS_FILE = Path("/app/tool_schemas.json")
 
 CATALOG_DESC_MAX_CHARS = 160
+MCP_OUTPUT_MAX_CHARS = int(os.getenv("OPENREWARD_MCP_OUTPUT_MAX_CHARS", "50000"))
+MCP_OUTPUT_MAX_JSON_STRING_CHARS = int(os.getenv("OPENREWARD_MCP_OUTPUT_MAX_JSON_STRING_CHARS", "2000"))
+MCP_SUBPROCESS_STREAM_LIMIT = int(os.getenv("OPENREWARD_MCP_SUBPROCESS_STREAM_LIMIT", str(16 * 1024 * 1024)))
+REWARD_MODE_ENV = "OPENREWARD_REWARD_MODE"
 
 # ── Load pre-discovered tool schemas ─────────────────────────────────────────
 
 ALL_TOOL_SCHEMAS: dict[str, list[dict]] = {}
 if TOOL_SCHEMAS_FILE.exists():
     ALL_TOOL_SCHEMAS = json.loads(TOOL_SCHEMAS_FILE.read_text())
+
+
+def _json_path(parent: str, key: Any) -> str:
+    if isinstance(key, int):
+        return f"{parent}[{key}]"
+    key_str = str(key)
+    if key_str.isidentifier():
+        return f"{parent}.{key_str}"
+    return f"{parent}[{key_str!r}]"
+
+
+def _sanitize_json_value(
+    value: Any,
+    truncations: list[dict[str, Any]],
+    path: str = "$",
+) -> Any:
+    """Keep MCP JSON results readable without giant unsplittable string lines."""
+    if isinstance(value, str):
+        if len(value) > MCP_OUTPUT_MAX_JSON_STRING_CHARS:
+            omitted = len(value) - MCP_OUTPUT_MAX_JSON_STRING_CHARS
+            truncations.append({"path": path, "omitted_chars": omitted})
+            return (
+                value[:MCP_OUTPUT_MAX_JSON_STRING_CHARS]
+                + f"... [truncated {omitted} chars at {path}]"
+            )
+        return value
+    if isinstance(value, list):
+        return [
+            _sanitize_json_value(item, truncations, _json_path(path, index))
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_json_value(item, truncations, _json_path(path, key))
+            for key, item in value.items()
+        }
+    return value
+
+
+def _safe_mcp_output(text: str) -> str:
+    """Bound MCP tool output and make any truncation explicit.
+
+    Some MCP servers return large JSON blobs with very long string fields (for
+    example Canvas HTML bodies). Prefer preserving valid JSON by truncating
+    long string values and adding an explicit notice with the affected paths.
+    """
+    notices: list[str] = []
+    try:
+        parsed = json.loads(text)
+        truncations: list[dict[str, Any]] = []
+        sanitized = _sanitize_json_value(parsed, truncations)
+        if truncations:
+            notice = {
+                "message": (
+                    "Large MCP output was shortened before returning it to "
+                    "the agent to avoid downstream chunking errors. Use a "
+                    "more specific Canvas query/get tool if omitted content "
+                    "is needed."
+                ),
+                "max_json_string_chars": MCP_OUTPUT_MAX_JSON_STRING_CHARS,
+                "truncated_field_count": len(truncations),
+                "truncated_fields": truncations[:50],
+            }
+            if isinstance(sanitized, dict):
+                sanitized = {"__toolathlon_output_notice": notice, **sanitized}
+            else:
+                sanitized = {
+                    "__toolathlon_output_notice": notice,
+                    "data": sanitized,
+                }
+        text = json.dumps(sanitized, indent=2)
+    except (TypeError, json.JSONDecodeError):
+        pass
+
+    if len(text) > MCP_OUTPUT_MAX_CHARS:
+        omitted = len(text) - MCP_OUTPUT_MAX_CHARS
+        notices.append(
+            f"Large MCP output exceeded {MCP_OUTPUT_MAX_CHARS} characters; "
+            f"{omitted} trailing characters were omitted."
+        )
+        text = text[:MCP_OUTPUT_MAX_CHARS] + f"\n... (output truncated, {omitted} chars omitted)"
+
+    if notices:
+        return "Toolathlon output notice: " + " ".join(notices) + "\n" + text
+    return text
+
+
+def _as_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _score_from_counts(passed: Any, total: Any = None, failed: Any = None) -> float | None:
+    passed_num = _as_number(passed)
+    total_num = _as_number(total)
+    failed_num = _as_number(failed)
+    if total_num is None and failed_num is not None and passed_num is not None:
+        total_num = passed_num + failed_num
+    if passed_num is None or total_num is None or total_num <= 0:
+        return None
+    return max(0.0, min(1.0, passed_num / total_num))
+
+
+def _score_from_result_json(value: Any) -> float | None:
+    if not isinstance(value, dict):
+        return None
+
+    for passed_key, total_key in (
+        ("total_passed", "total_checks"),
+        ("passed", "total"),
+        ("pass", "total"),
+    ):
+        if passed_key in value and total_key in value:
+            score = _score_from_counts(value.get(passed_key), value.get(total_key))
+            if score is not None:
+                return score
+
+    for passed_key, failed_key in (
+        ("passed", "failed"),
+        ("pass", "fail"),
+        ("total_passed", "total_failed"),
+    ):
+        if passed_key in value and failed_key in value:
+            score = _score_from_counts(value.get(passed_key), failed=value.get(failed_key))
+            if score is not None:
+                return score
+
+    for percent_key in ("accuracy", "percentage", "percent"):
+        if percent_key in value:
+            percent = _as_number(value.get(percent_key))
+            if percent is not None:
+                return max(0.0, min(1.0, percent / 100.0))
+
+    for score_key in ("reward", "score"):
+        if score_key in value:
+            score = _as_number(value.get(score_key))
+            if score is not None and 0.0 <= score <= 1.0:
+                return score
+
+    for item in value.values():
+        if isinstance(item, dict):
+            score = _score_from_result_json(item)
+            if score is not None:
+                return score
+    return None
+
+
+def _score_from_eval_output(output: str) -> float | None:
+    patterns = (
+        r"Overall:\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s+checks\s+passed",
+        r"Results?:\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s+passed",
+        r"Passed:\s*(\d+(?:\.\d+)?)\s*,?\s*Failed:\s*(\d+(?:\.\d+)?)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, output, re.IGNORECASE)
+        if not match:
+            continue
+        first = float(match.group(1))
+        second = float(match.group(2))
+        if "failed" in pattern.lower():
+            return _score_from_counts(first, failed=second)
+        return _score_from_counts(first, second)
+    return None
+
+
+def _partial_reward_from_grader(res_log: Path, output: str) -> float | None:
+    if res_log.exists():
+        try:
+            score = _score_from_result_json(json.loads(res_log.read_text()))
+            if score is not None:
+                return score
+        except (OSError, json.JSONDecodeError):
+            pass
+    return _score_from_eval_output(output)
+
+
+def _reward_for_evaluation(binary_reward: float, res_log: Path, output: str) -> float:
+    mode = os.getenv(REWARD_MODE_ENV, "binary").strip().lower()
+    if mode not in {"partial", "partials", "fractional"}:
+        return binary_reward
+
+    partial_reward = _partial_reward_from_grader(res_log, output)
+    if partial_reward is None:
+        return binary_reward
+    return partial_reward
 
 
 # ── Server configuration ─────────────────────────────────────────────────────
@@ -269,6 +467,7 @@ class MCPBridge:
                     stderr=asyncio.subprocess.PIPE,
                     env=full_env,
                     cwd=cwd,
+                    limit=MCP_SUBPROCESS_STREAM_LIMIT,
                 )
                 mcp_proc = _MCPProcess(name, proc)
 
@@ -639,9 +838,7 @@ class ToolathlonGym(Environment):
                 result_text = await self._mcp_bridge.call_tool(
                     mcp_tool_name, input, server=explicit_server
                 )
-                # Truncate very long outputs
-                if len(result_text) > 50000:
-                    result_text = result_text[:50000] + "\n... (output truncated)"
+                result_text = _safe_mcp_output(result_text)
                 return RunToolOutput(RunToolSuccess(
                     output=ToolOutput(blocks=[TextBlock(text=result_text)])
                 ))
@@ -692,8 +889,7 @@ class ToolathlonGym(Environment):
         except Exception as e:
             return ToolOutput(blocks=[TextBlock(text=f"MCP tool error: {e}")])
 
-        if len(result_text) > 50000:
-            result_text = result_text[:50000] + "\n... (output truncated)"
+        result_text = _safe_mcp_output(result_text)
         return ToolOutput(blocks=[TextBlock(text=result_text)])
 
     @tool
@@ -726,15 +922,17 @@ class ToolathlonGym(Environment):
             output = stdout.decode() + stderr.decode()
 
             if proc.returncode == 0:
+                reward = _reward_for_evaluation(1.0, res_log, output)
                 return ToolOutput(
                     blocks=[TextBlock(text=f"PASS\n{output}")],
-                    reward=1.0,
+                    reward=reward,
                     finished=True,
                 )
             else:
+                reward = _reward_for_evaluation(0.0, res_log, output)
                 return ToolOutput(
                     blocks=[TextBlock(text=f"FAIL\n{output}")],
-                    reward=0.0,
+                    reward=reward,
                     finished=True,
                 )
         except asyncio.TimeoutError:
