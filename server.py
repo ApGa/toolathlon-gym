@@ -16,6 +16,7 @@ input_schema on demand via `get_tool_details` and invokes it via
 `call_tool`.
 """
 import asyncio
+import functools
 import json
 import os
 import random
@@ -54,6 +55,30 @@ MCP_OUTPUT_MAX_CHARS = int(os.getenv("OPENREWARD_MCP_OUTPUT_MAX_CHARS", "50000")
 MCP_OUTPUT_MAX_JSON_STRING_CHARS = int(os.getenv("OPENREWARD_MCP_OUTPUT_MAX_JSON_STRING_CHARS", "2000"))
 MCP_SUBPROCESS_STREAM_LIMIT = int(os.getenv("OPENREWARD_MCP_SUBPROCESS_STREAM_LIMIT", str(16 * 1024 * 1024)))
 REWARD_MODE_ENV = "OPENREWARD_REWARD_MODE"
+TOOL_ROUTING_SCHEMA_KEY = "x-openhands-tool-routing"
+
+
+def _with_tool_routing(
+    spec: ToolSpec,
+    *,
+    capabilities: tuple[str, ...],
+    invocation: dict[str, Any],
+) -> ToolSpec:
+    """Attach routing metadata through an ignorable JSON-Schema extension.
+
+    OpenReward's current ``ToolSpec`` has no arbitrary metadata field.  A
+    namespaced root schema extension survives the OpenReward API and remains
+    harmless to clients that do not understand orchestration routing.
+    """
+
+    schema = dict(spec.input_schema or {"type": "object", "properties": {}})
+    schema[TOOL_ROUTING_SCHEMA_KEY] = {
+        "version": 1,
+        "execution_domain": "task",
+        "capabilities": list(capabilities),
+        "invocation": invocation,
+    }
+    return spec.model_copy(update={"input_schema": schema})
 
 # ── Load pre-discovered tool schemas ─────────────────────────────────────────
 
@@ -506,16 +531,18 @@ class MCPBridge:
     async def call_tool(self, tool_name: str, arguments: dict, *, server: str | None = None) -> str:
         candidates = self._tool_servers.get(tool_name) or []
         if not candidates:
-            return f"Error: Unknown tool '{tool_name}'"
+            raise ValueError(f"Unknown tool '{tool_name}'")
         if server is not None:
             if server not in candidates:
-                return f"Error: Tool '{tool_name}' is not provided by server '{server}'"
+                raise ValueError(
+                    f"Tool '{tool_name}' is not provided by server '{server}'"
+                )
             chosen = server
         else:
             chosen = candidates[0]  # ambiguous: first registered wins
         proc = self._processes.get(chosen)
         if not proc:
-            return f"Error: Server '{chosen}' is not running"
+            raise RuntimeError(f"Server '{chosen}' is not running")
         return await proc.call_tool(tool_name, arguments)
 
     async def close(self):
@@ -556,6 +583,33 @@ class CallToolInput(BaseModel):
 # ── Toolathlon Gym Environment ───────────────────────────────────────────────
 
 class ToolathlonGym(Environment):
+
+    @classmethod
+    @functools.cache
+    def list_tools(cls) -> ListToolsOutput:
+        """Advertise routing metadata for the environment's direct tools."""
+
+        tools: list[ToolSpec] = []
+        for spec in super().list_tools().tools:
+            if spec.name == "python_execute":
+                spec = _with_tool_routing(
+                    spec,
+                    capabilities=(
+                        "python.execute",
+                        "filesystem.read",
+                        "filesystem.write",
+                        "system.execute",
+                    ),
+                    invocation={"kind": "direct"},
+                )
+            elif spec.name == "claim_done":
+                spec = _with_tool_routing(
+                    spec,
+                    capabilities=("task.submit",),
+                    invocation={"kind": "direct"},
+                )
+            tools.append(spec)
+        return ListToolsOutput(tools=tools)
 
     def __init__(self, task_spec: dict = {}, secrets: dict[str, str] = {}):
         super().__init__(task_spec, secrets)
@@ -802,23 +856,37 @@ class ToolathlonGym(Environment):
 
     def list_task_tools(self) -> ListToolsOutput:
         return ListToolsOutput(tools=[
-            ToolSpec(
-                name="get_tool_details",
-                description=(
-                    "Return the full input_schema and description for one MCP "
-                    "tool, looked up by its `server.tool_name` identifier "
-                    "(as listed in the system-prompt catalog)."
+            _with_tool_routing(
+                ToolSpec(
+                    name="get_tool_details",
+                    description=(
+                        "Return the full input_schema and description for one MCP "
+                        "tool, looked up by its `server.tool_name` identifier "
+                        "(as listed in the system-prompt catalog)."
+                    ),
+                    input_schema=GetToolDetailsInput.model_json_schema(),
                 ),
-                input_schema=GetToolDetailsInput.model_json_schema(),
+                capabilities=("tool.discover",),
+                invocation={"kind": "direct"},
             ),
-            ToolSpec(
-                name="call_tool",
-                description=(
-                    "Invoke an MCP tool. Pass the `server.tool_name` from the "
-                    "system-prompt catalog and an `arguments` object matching "
-                    "that tool's input_schema (fetch via get_tool_details)."
+            _with_tool_routing(
+                ToolSpec(
+                    name="call_tool",
+                    description=(
+                        "Invoke an MCP tool. Pass the `server.tool_name` from the "
+                        "system-prompt catalog and an `arguments` object matching "
+                        "that tool's input_schema (fetch via get_tool_details)."
+                    ),
+                    input_schema=CallToolInput.model_json_schema(),
                 ),
-                input_schema=CallToolInput.model_json_schema(),
+                capabilities=("tool.dispatch",),
+                invocation={
+                    "kind": "dispatcher",
+                    "name_argument": "name",
+                    "arguments_argument": "arguments",
+                    "discovery_tool": "get_tool_details",
+                    "targets": [],
+                },
             ),
         ])
 
@@ -854,10 +922,10 @@ class ToolathlonGym(Environment):
         """Return the full schema and description for one MCP tool."""
         entry = self._task_tool_by_name.get(params.name)
         if entry is None:
-            return ToolOutput(blocks=[TextBlock(text=(
-                f"Error: unknown tool '{params.name}'. Pass the exact "
+            raise ValueError(
+                f"Unknown catalog tool '{params.name}'. Pass the exact "
                 "`server.tool_name` shown in the system-prompt catalog."
-            ))])
+            )
         payload = {
             "name": entry["name"],
             "server": entry["server"],
@@ -869,25 +937,24 @@ class ToolathlonGym(Environment):
     @tool(shared=False)
     async def call_tool(self, params: CallToolInput) -> ToolOutput:
         """Invoke an MCP tool by name, dispatching through the running bridge."""
-        if self._mcp_bridge is None:
-            return ToolOutput(blocks=[TextBlock(
-                text="Error: MCP bridge is not running for this task."
-            )])
-
         name = params.name
         entry = self._task_tool_by_name.get(name)
         if entry is None:
-            return ToolOutput(blocks=[TextBlock(text=(
-                f"Error: unknown tool '{name}'. Pass the exact "
+            raise ValueError(
+                f"Unknown catalog tool '{name}'. Pass the exact "
                 "`server.tool_name` shown in the system-prompt catalog."
-            ))])
+            )
+        if self._mcp_bridge is None:
+            raise RuntimeError("MCP bridge is not running for this task")
 
         try:
             result_text = await self._mcp_bridge.call_tool(
                 entry["bare_name"], dict(params.arguments), server=entry["server"]
             )
-        except Exception as e:
-            return ToolOutput(blocks=[TextBlock(text=f"MCP tool error: {e}")])
+        except Exception as exc:
+            raise RuntimeError(
+                f"MCP catalog tool '{name}' failed: {exc}"
+            ) from exc
 
         result_text = _safe_mcp_output(result_text)
         return ToolOutput(blocks=[TextBlock(text=result_text)])
