@@ -28,7 +28,7 @@ logger = logging.getLogger("mcp_snowflake_server")
 
 
 def handle_tool_errors(func: Callable) -> Callable:
-    """Decorator to standardize tool error handling"""
+    """Log tool failures while preserving MCP's typed error response."""
 
     @wraps(func)
     async def wrapper(*args, **kwargs) -> list[types.TextContent]:
@@ -36,7 +36,9 @@ def handle_tool_errors(func: Callable) -> Callable:
             return await func(*args, **kwargs)
         except Exception as e:
             logger.error(f"Error in {func.__name__}: {str(e)}")
-            return [types.TextContent(type="text", text=f"Error: {str(e)}")]
+            # Returning ordinary TextContent here makes invalid SQL and bad
+            # arguments indistinguishable from successful tool output.
+            raise
 
     return wrapper
 

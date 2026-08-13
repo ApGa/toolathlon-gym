@@ -1,11 +1,17 @@
 import unittest
-from unittest.mock import AsyncMock
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from server import (
     TOOL_ROUTING_SCHEMA_KEY,
     CallToolInput,
     GetToolDetailsInput,
+    PythonExecuteInput,
+    TOOL_ERROR_META_KEY,
     ToolathlonGym,
+    _MCPProcess,
 )
 
 
@@ -88,7 +94,7 @@ class ToolRoutingTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "Unknown catalog tool"):
             await environment.get_tool_details(GetToolDetailsInput(name="missing.tool"))
 
-    async def test_missing_bridge_and_mcp_failure_raise(self) -> None:
+    async def test_missing_bridge_raises_and_mcp_failure_is_typed(self) -> None:
         environment = ToolathlonGym.__new__(ToolathlonGym)
         environment._task_tool_by_name = {
             "server.tool": {
@@ -103,11 +109,66 @@ class ToolRoutingTest(unittest.IsolatedAsyncioTestCase):
 
         environment._mcp_bridge = AsyncMock()
         environment._mcp_bridge.call_tool.side_effect = OSError("disconnected")
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "MCP catalog tool 'server.tool' failed: disconnected",
-        ):
-            await environment.call_tool(CallToolInput(name="server.tool", arguments={}))
+        result = await environment.call_tool(
+            CallToolInput(name="server.tool", arguments={})
+        )
+
+        self.assertEqual(
+            result.metadata[TOOL_ERROR_META_KEY],
+            {
+                "kind": "mcp_tool_error",
+                "message": "MCP catalog tool 'server.tool' failed: disconnected",
+            },
+        )
+
+    async def test_mcp_is_error_result_raises(self) -> None:
+        process = _MCPProcess("server", SimpleNamespace())
+        process.send_recv = AsyncMock(
+            return_value={
+                "result": {
+                    "isError": True,
+                    "content": [{"type": "text", "text": "invalid argument"}],
+                }
+            }
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "invalid argument"):
+            await process.call_tool("tool", {"bad": True})
+
+    async def test_mcp_success_result_is_unchanged(self) -> None:
+        process = _MCPProcess("server", SimpleNamespace())
+        process.send_recv = AsyncMock(
+            return_value={
+                "result": {
+                    "isError": False,
+                    "content": [{"type": "text", "text": "ok"}],
+                }
+            }
+        )
+
+        self.assertEqual(await process.call_tool("tool", {}), "ok")
+
+    async def test_python_nonzero_exit_is_typed(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            environment = ToolathlonGym.__new__(ToolathlonGym)
+            environment.workspace_dir = Path(tmp_dir)
+            environment._pg_env = lambda: {}
+            process = SimpleNamespace(
+                returncode=7,
+                communicate=AsyncMock(return_value=(b"partial output\n", b"boom\n")),
+            )
+            with patch(
+                "server.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ):
+                result = await environment.python_execute(
+                    PythonExecuteInput(code="raise RuntimeError('boom')")
+                )
+
+        marker = result.metadata[TOOL_ERROR_META_KEY]
+        self.assertEqual(marker["kind"], "nonzero_exit")
+        self.assertIn("status 7", marker["message"])
+        self.assertIn("boom", marker["message"])
 
 
 if __name__ == "__main__":

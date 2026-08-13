@@ -56,6 +56,7 @@ MCP_OUTPUT_MAX_JSON_STRING_CHARS = int(os.getenv("OPENREWARD_MCP_OUTPUT_MAX_JSON
 MCP_SUBPROCESS_STREAM_LIMIT = int(os.getenv("OPENREWARD_MCP_SUBPROCESS_STREAM_LIMIT", str(16 * 1024 * 1024)))
 REWARD_MODE_ENV = "OPENREWARD_REWARD_MODE"
 TOOL_ROUTING_SCHEMA_KEY = "x-openhands-tool-routing"
+TOOL_ERROR_META_KEY = "openhands.dev/tool-error"
 
 
 def _with_tool_routing(
@@ -79,6 +80,26 @@ def _with_tool_routing(
         "invocation": invocation,
     }
     return spec.model_copy(update={"input_schema": schema})
+
+
+def _tool_error_output(message: str, *, kind: str) -> ToolOutput:
+    """Return a recoverable error that tool-aware clients can identify.
+
+    OpenReward ``ToolOutput`` does not yet have an error discriminator.  Keep
+    the session usable for a corrective call and declare the error through a
+    namespaced metadata marker that the Platoon OpenReward bridge translates
+    to MCP ``isError``.
+    """
+
+    return ToolOutput(
+        blocks=[TextBlock(text=message)],
+        metadata={
+            TOOL_ERROR_META_KEY: {
+                "kind": kind,
+                "message": message,
+            }
+        },
+    )
 
 # ── Load pre-discovered tool schemas ─────────────────────────────────────────
 
@@ -407,9 +428,11 @@ class _MCPProcess:
             "arguments": arguments,
         }, timeout=120)
         if resp is None:
-            return "Error: MCP tool call timed out"
+            raise TimeoutError("MCP tool call timed out after 120 seconds")
         if "error" in resp:
-            return f"Error: {resp['error'].get('message', str(resp['error']))}"
+            error = resp["error"]
+            detail = error.get("message", str(error)) if isinstance(error, dict) else str(error)
+            raise RuntimeError(f"MCP tool call failed: {detail}")
         result = resp.get("result", {})
         # Extract content from MCP result
         content_parts = result.get("content", [])
@@ -421,7 +444,10 @@ class _MCPProcess:
                 texts.append(json.dumps(part))
             else:
                 texts.append(str(part))
-        return "\n".join(texts) if texts else json.dumps(result)
+        output = "\n".join(texts) if texts else json.dumps(result)
+        if result.get("isError") is True:
+            raise RuntimeError(output or "MCP tool reported an error")
+        return output
 
     async def close(self):
         try:
@@ -952,9 +978,10 @@ class ToolathlonGym(Environment):
                 entry["bare_name"], dict(params.arguments), server=entry["server"]
             )
         except Exception as exc:
-            raise RuntimeError(
-                f"MCP catalog tool '{name}' failed: {exc}"
-            ) from exc
+            return _tool_error_output(
+                f"MCP catalog tool '{name}' failed: {exc}",
+                kind="mcp_tool_error",
+            )
 
         result_text = _safe_mcp_output(result_text)
         return ToolOutput(blocks=[TextBlock(text=result_text)])
@@ -1039,11 +1066,22 @@ class ToolathlonGym(Environment):
                 result += f"stderr:\n{errors}\n"
             if not result:
                 result = "(no output)"
+            if proc.returncode != 0:
+                return _tool_error_output(
+                    f"Python exited with status {proc.returncode}.\n{result}",
+                    kind="nonzero_exit",
+                )
             return ToolOutput(blocks=[TextBlock(text=result)])
         except asyncio.TimeoutError:
-            return ToolOutput(blocks=[TextBlock(text="Execution timed out after 60s")])
+            return _tool_error_output(
+                "Python execution timed out after 60 seconds.",
+                kind="timeout",
+            )
         except Exception as e:
-            return ToolOutput(blocks=[TextBlock(text=f"Execution error: {e}")])
+            return _tool_error_output(
+                f"Python execution failed: {e}",
+                kind="execution_error",
+            )
         finally:
             code_file.unlink(missing_ok=True)
 
