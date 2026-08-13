@@ -40,9 +40,7 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64
-          tags: |
-            ghcr.io/apga/openreward-toolathlon-gym:${{ github.sha }}
-            ghcr.io/apga/openreward-toolathlon-gym:34fc975
+          tags: ghcr.io/apga/toolathlon-gym:${{ github.sha }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
