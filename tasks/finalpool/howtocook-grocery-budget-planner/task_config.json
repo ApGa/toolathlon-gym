@@ -13,5 +13,10 @@
     "manage_context",
     "history",
     "python_execute"
-  ]
+  ],
+  "http_fixture": {
+    "port": 30233,
+    "source": "files/mock_pages.tar.gz",
+    "root": "mock_pages"
+  }
 }

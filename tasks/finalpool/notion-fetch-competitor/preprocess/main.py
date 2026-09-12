@@ -1,17 +1,11 @@
-"""
-Preprocess script for notion-fetch-competitor task.
+"""Prepare task data for notion-fetch-competitor.
 
-This script:
-1. Clears Notion data
-2. Extracts files/mock_api.tar.gz and starts HTTP server on port 30156
-3. Ensures memory dir exists in agent_workspace
+HTTP fixture lifecycle is managed by the environment server (task_config.json).
 """
 
 import argparse
 import asyncio
 import os
-import shutil
-import tarfile
 
 import psycopg2
 
@@ -33,42 +27,6 @@ def clear_notion(cur):
     cur.execute("DELETE FROM notion.databases")
     cur.execute("DELETE FROM notion.users")
     print("[preprocess] Notion data cleared.")
-
-
-async def setup_mock_server():
-    """Extract mock_api.tar.gz and start HTTP server on port 30156."""
-    print("[preprocess] Setting up mock competitor API...")
-
-    task_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    files_dir = os.path.join(task_root, "files")
-    tmp_dir = os.path.join(task_root, "tmp")
-
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    tar_path = os.path.join(files_dir, "mock_api.tar.gz")
-    with tarfile.open(tar_path, "r:gz") as tar:
-        tar.extractall(path=tmp_dir)
-    print(f"[preprocess] Extracted {tar_path} to {tmp_dir}")
-
-    serve_dir = tmp_dir
-    port = 30156
-
-    kill_proc = await asyncio.create_subprocess_shell(
-        f"kill -9 $(lsof -ti:{port}) 2>/dev/null",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await kill_proc.wait()
-    await asyncio.sleep(0.5)
-
-    await asyncio.create_subprocess_shell(
-        f"nohup python3 -m http.server {port} --directory {serve_dir} "
-        f"> {serve_dir}/server.log 2>&1 &"
-    )
-    await asyncio.sleep(1)
-    print(f"[preprocess] Mock competitor API running at http://localhost:{port}")
 
 
 def ensure_memory_dir(agent_workspace):
@@ -105,7 +63,6 @@ async def main():
         cur.close()
         conn.close()
 
-    await setup_mock_server()
 
     if args.agent_workspace:
         ensure_memory_dir(args.agent_workspace)

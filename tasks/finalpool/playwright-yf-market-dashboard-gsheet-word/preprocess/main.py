@@ -1,17 +1,12 @@
-"""
-Preprocess script for playwright-yf-market-dashboard-gsheet-word task.
+"""Prepare task data for playwright-yf-market-dashboard-gsheet-word.
 
-1. Clears email and gsheet data (writable schemas).
-2. Extracts mock_pages.tar.gz and starts HTTP server on port 30204.
-3. yf schema is read-only -- do NOT modify.
+HTTP fixture lifecycle is managed by the environment server (task_config.json).
 """
 
 import argparse
 import asyncio
 import glob as globmod
 import os
-import shutil
-import tarfile
 
 import psycopg2
 
@@ -62,41 +57,6 @@ def inject_noise_data(cur):
     print("[preprocess] Noise data injected.")
 
 
-async def setup_mock_server():
-    print("[preprocess] Setting up mock market dashboard...")
-
-    task_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    files_dir = os.path.join(task_root, "files")
-    tmp_dir = os.path.join(task_root, "tmp")
-
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    tar_path = os.path.join(files_dir, "mock_pages.tar.gz")
-    with tarfile.open(tar_path, "r:gz") as tar:
-        tar.extractall(path=tmp_dir)
-    print(f"[preprocess] Extracted {tar_path} to {tmp_dir}")
-
-    mock_dir = os.path.join(tmp_dir, "mock_pages")
-    port = 30204
-
-    kill_proc = await asyncio.create_subprocess_shell(
-        f"kill -9 $(lsof -ti:{port}) 2>/dev/null",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await kill_proc.wait()
-    await asyncio.sleep(0.5)
-
-    await asyncio.create_subprocess_shell(
-        f"nohup python3 -m http.server {port} --directory {mock_dir} "
-        f"> {mock_dir}/server.log 2>&1 &"
-    )
-    await asyncio.sleep(1)
-    print(f"[preprocess] Mock dashboard running at http://localhost:{port}")
-
-
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
@@ -120,7 +80,6 @@ async def main():
         cur.close()
         conn.close()
 
-    await setup_mock_server()
 
     if args.agent_workspace:
         for pattern in ["Weekly_Market_Report.docx"]:

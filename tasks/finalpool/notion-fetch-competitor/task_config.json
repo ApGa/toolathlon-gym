@@ -12,5 +12,10 @@
     "history",
     "python_execute"
   ],
-  "meta": {}
+  "meta": {},
+  "http_fixture": {
+    "port": 30156,
+    "source": "files/mock_api.tar.gz",
+    "root": "."
+  }
 }

@@ -1,14 +1,10 @@
-"""
-Preprocess for yf-portfolio-gsheet-tracker task.
-- Clears gsheet schema tables
-- Injects spreadsheet, sheet, and header cells into gsheet schema
-- Extracts mock_pages.tar.gz and starts HTTP server on port 30155
+"""Prepare task data for yf-portfolio-gsheet-tracker.
+
+HTTP fixture lifecycle is managed by the environment server (task_config.json).
 """
 import argparse
 import asyncio
 import os
-import shutil
-import tarfile
 import psycopg2
 
 
@@ -24,7 +20,6 @@ SPREADSHEET_ID = "sp_portfolio_tracker_q1_2026"
 SPREADSHEET_TITLE = "Portfolio Tracker Q1 2026"
 SHEET_ID = 1
 SHEET_TITLE = "Holdings"
-PORT = 30155
 
 HEADERS = [
     "Symbol", "Shares", "Purchase_Price", "Current_Price", "Market_Value",
@@ -95,40 +90,6 @@ def setup_gsheet():
     conn.close()
 
 
-async def run_command(cmd: str):
-    proc = await asyncio.create_subprocess_shell(
-        cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    await proc.wait()
-
-
-async def setup_mock_server():
-    """Extract mock pages and start HTTP server."""
-    task_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    files_dir = os.path.join(task_root, "files")
-
-    print("Setting up mock compliance portal ...")
-    tmp_dir = os.path.join(task_root, "tmp")
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    tar_path = os.path.join(files_dir, "mock_pages.tar.gz")
-    with tarfile.open(tar_path, "r:gz") as tar:
-        tar.extractall(path=tmp_dir)
-    print(f"  -> Extracted {tar_path} to {tmp_dir}")
-
-    mock_dir = os.path.join(tmp_dir, "mock_pages")
-    await run_command(f"kill -9 $(lsof -ti:{PORT}) 2>/dev/null")
-    await asyncio.sleep(0.5)
-    await asyncio.create_subprocess_shell(
-        f"nohup python3 -m http.server {PORT} --directory {mock_dir} "
-        f"> {mock_dir}/server.log 2>&1 &"
-    )
-    await asyncio.sleep(1)
-    print(f"  -> Mock compliance portal running at http://localhost:{PORT}")
-
-
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", type=str, required=False)
@@ -139,7 +100,6 @@ async def main():
     setup_gsheet()
 
     # 2. Set up mock HTTP server
-    await setup_mock_server()
 
     print("\nPreprocessing completed successfully!")
 

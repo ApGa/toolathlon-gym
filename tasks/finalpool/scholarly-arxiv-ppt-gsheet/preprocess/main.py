@@ -86,6 +86,7 @@ def clear_schemas(conn):
         cur.execute("DELETE FROM gsheet.cells")
         cur.execute("DELETE FROM gsheet.sheets")
         cur.execute("DELETE FROM gsheet.spreadsheets")
+        cur.execute("DELETE FROM email.sent_log")
         cur.execute("DELETE FROM email.messages")
         cur.execute("DELETE FROM scholarly.arxiv_papers")
         cur.execute("DELETE FROM arxiv.papers")

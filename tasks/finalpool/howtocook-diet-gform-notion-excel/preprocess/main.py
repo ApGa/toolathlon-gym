@@ -20,6 +20,7 @@ def clear_schemas(conn):
         cur.execute("DELETE FROM gform.questions")
         cur.execute("DELETE FROM gform.forms")
         cur.execute("DELETE FROM notion.pages")
+        cur.execute("DELETE FROM email.sent_log")
         cur.execute("DELETE FROM email.messages")
     conn.commit()
     print("[preprocess] Cleared gform, notion, and email schemas")

@@ -8,6 +8,10 @@ on:
       - .github/workflows/build-container.yml
       - Dockerfile
       - server.py
+      - http_fixtures.py
+      - task_setup.py
+      - requirements.txt
+      - tests/**
       - entrypoint.sh
       - discover_tools.py
       - configs/**
@@ -22,7 +26,18 @@ permissions:
   packages: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

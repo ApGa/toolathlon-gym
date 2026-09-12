@@ -7,3 +7,4 @@ openpyxl
 python-pptx
 pyyaml
 aiofiles
+pypdf>=5,<7

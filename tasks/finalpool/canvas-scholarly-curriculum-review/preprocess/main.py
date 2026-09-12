@@ -1,7 +1,6 @@
-"""Preprocess for canvas-scholarly-curriculum-review.
-Clears scholarly and notion data, injects papers and parent page.
-Starts mock HTTP server for accreditation requirements on port 30238.
-Canvas is read-only.
+"""Prepare task data for canvas-scholarly-curriculum-review.
+
+HTTP fixture lifecycle is managed by the environment server (task_config.json).
 """
 import argparse
 import asyncio
@@ -155,33 +154,6 @@ def clear_and_inject_notion(cur):
     print(f"[preprocess] Notion parent page created: {parent_page_id}")
 
 
-async def setup_mock_server():
-    """Start HTTP server on port 30238."""
-    task_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    files_dir = os.path.join(task_root, "files", "mock_pages")
-    tmp_dir = os.path.join(task_root, "tmp")
-
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
-    shutil.copytree(files_dir, tmp_dir)
-
-    port = 30238
-    kill_proc = await asyncio.create_subprocess_shell(
-        f"kill -9 $(lsof -ti:{port}) 2>/dev/null",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await kill_proc.wait()
-    await asyncio.sleep(0.5)
-
-    await asyncio.create_subprocess_shell(
-        f"nohup python3 -m http.server {port} --directory {tmp_dir} "
-        f"> {tmp_dir}/server.log 2>&1 &"
-    )
-    await asyncio.sleep(1)
-    print(f"[preprocess] Mock server running at http://localhost:{port}")
-
-
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
@@ -202,7 +174,6 @@ async def main():
         cur.close()
         conn.close()
 
-    await setup_mock_server()
 
     if args.agent_workspace:
         initial_ws = os.path.join(

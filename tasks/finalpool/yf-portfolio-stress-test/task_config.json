@@ -14,5 +14,9 @@
     "history",
     "python_execute"
   ],
-  "meta": {}
+  "meta": {},
+  "http_fixture": {
+    "port": 30224,
+    "source": "files/mock_pages"
+  }
 }

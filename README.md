@@ -50,6 +50,44 @@ docker run --rm \
 
 If `OPENREWARD_WORKERS` is unset, the container defaults to the host CPU count with a minimum of 4 workers. There is no fixed upper cap; make sure `OPENREWARD_PG_MAX_CONNECTIONS`, CPU, and memory are sized for the number of concurrent sessions.
 
+### Concurrent task setup and HTTP fixtures
+
+Each episode copies its task into a private, writable temporary directory. The
+127 tasks with local HTTP data declare an `http_fixture` in `task_config.json`:
+
+```json
+"http_fixture": {
+  "port": 30180,
+  "source": "files/mock_pages.tar.gz",
+  "root": "mock_pages"
+}
+```
+
+`port` identifies the original URLs in the task assets. The environment serves
+each episode's private fixture on an OS-assigned loopback port and updates its
+instructions, scripts, text inputs, PDFs, Office documents, and fixture links to
+use that endpoint. Legacy URLs in tool arguments and results are also translated.
+The endpoint stays alive until the episode is torn down. Preprocessors only
+prepare task data; they must not start servers or kill processes on fixed ports.
+
+This works with read-only task assets and an unprivileged container user,
+including Apptainer and Enroot deployments. Concurrent episodes can share the
+host network without overwriting or terminating each other's fixtures. The
+server, MCP tools, and Python execution must share a network namespace and have
+access to writable temporary and workspace directories.
+
+Setup checks that the fixture serves its actual data. A failed or timed-out
+preprocessor rejects the episode setup and cleans up its resources. The server
+logs the task, session, and the last 8 KiB of subprocess output. The preprocessing
+timeout is 30 seconds; this is separate from the agent's rollout time limit.
+
+Run the regression suite with Python 3.12 and the server dependencies installed:
+
+```bash
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests -v
+```
+
 ## License
 
 [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0).
@@ -120,4 +158,3 @@ Agents operate within Docker containers with isolated PostgreSQL databases and p
   url       = {https://github.com/eigent-ai/toolathlon_gym}
 }
 ```
-

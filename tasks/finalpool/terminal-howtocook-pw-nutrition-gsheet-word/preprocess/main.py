@@ -1,11 +1,11 @@
-"""Preprocess for terminal-howtocook-pw-nutrition-gsheet-word.
-Clears gsheet writable schema. Extracts mock pages and starts HTTP server on port 30404."""
+"""Prepare task data for terminal-howtocook-pw-nutrition-gsheet-word.
+
+HTTP fixture lifecycle is managed by the environment server (task_config.json).
+"""
 import argparse
 import asyncio
 import os
 import glob as globmod
-import shutil
-import tarfile
 import uuid
 import psycopg2
 
@@ -14,8 +14,6 @@ DB_CONFIG = {
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel",
 }
-
-TASK_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def clear_db():
@@ -45,36 +43,6 @@ def clear_db():
         conn.close()
 
 
-async def setup_mock_server():
-    """Extract mock_pages.tar.gz and start HTTP server on port 30404."""
-    files_dir = os.path.join(TASK_ROOT, "files")
-    tmp_dir = os.path.join(TASK_ROOT, "tmp")
-
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    tar_path = os.path.join(files_dir, "mock_pages.tar.gz")
-    with tarfile.open(tar_path, "r:gz") as tar:
-        tar.extractall(path=tmp_dir)
-    print(f"[preprocess] Extracted {tar_path} to {tmp_dir}")
-
-    mock_dir = os.path.join(tmp_dir, "task4_mock_pages")
-    port = 30404
-
-    kill_proc = await asyncio.create_subprocess_shell(
-        f"kill -9 $(lsof -ti:{port}) 2>/dev/null",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    await kill_proc.wait()
-    await asyncio.sleep(0.5)
-
-    await asyncio.create_subprocess_shell(
-        f"nohup python3 -m http.server {port} --directory {mock_dir} "
-        f"> {mock_dir}/server.log 2>&1 &")
-    await asyncio.sleep(1)
-    print(f"[preprocess] Mock server running at http://localhost:{port}")
-
-
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", type=str, required=False)
@@ -82,7 +50,6 @@ async def main():
     args = parser.parse_args()
 
     clear_db()
-    await setup_mock_server()
 
     if args.agent_workspace:
         for pattern in ["Wellness_Diet_Plan.docx", "nutrition_calculator.py"]:

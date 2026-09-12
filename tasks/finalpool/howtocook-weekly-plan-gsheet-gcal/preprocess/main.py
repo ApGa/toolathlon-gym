@@ -21,6 +21,7 @@ def clear_schemas(conn):
         cur.execute("DELETE FROM gsheet.sheets")
         cur.execute("DELETE FROM gsheet.spreadsheets")
         cur.execute("DELETE FROM gcal.events")
+        cur.execute("DELETE FROM email.sent_log")
         cur.execute("DELETE FROM email.messages")
     conn.commit()
     print("[preprocess] Cleared gsheet, gcal, and email schemas")

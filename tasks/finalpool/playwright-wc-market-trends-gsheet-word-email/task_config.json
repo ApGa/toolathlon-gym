@@ -15,5 +15,10 @@
     "history",
     "python_execute"
   ],
-  "meta": {}
+  "meta": {},
+  "http_fixture": {
+    "port": 30220,
+    "source": "files/mock_pages.tar.gz",
+    "root": "mock_pages"
+  }
 }

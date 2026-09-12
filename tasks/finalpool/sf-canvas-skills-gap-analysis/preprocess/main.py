@@ -1,6 +1,6 @@
-"""Preprocess for sf-canvas-skills-gap-analysis.
-Clears email data and starts mock HTTP server for skills portal on port 30237.
-SF and Canvas are read-only.
+"""Prepare task data for sf-canvas-skills-gap-analysis.
+
+HTTP fixture lifecycle is managed by the environment server (task_config.json).
 """
 import argparse
 import asyncio
@@ -31,34 +31,6 @@ def clear_email(conn):
     print("[preprocess] Email data cleared.")
 
 
-async def setup_mock_server():
-    """Start HTTP server on port 30237 serving skills portal pages."""
-    task_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    files_dir = os.path.join(task_root, "files", "mock_pages")
-    tmp_dir = os.path.join(task_root, "tmp")
-
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
-    shutil.copytree(files_dir, tmp_dir)
-    print(f"[preprocess] Copied mock_pages to {tmp_dir}")
-
-    port = 30237
-    kill_proc = await asyncio.create_subprocess_shell(
-        f"kill -9 $(lsof -ti:{port}) 2>/dev/null",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await kill_proc.wait()
-    await asyncio.sleep(0.5)
-
-    await asyncio.create_subprocess_shell(
-        f"nohup python3 -m http.server {port} --directory {tmp_dir} "
-        f"> {tmp_dir}/server.log 2>&1 &"
-    )
-    await asyncio.sleep(1)
-    print(f"[preprocess] Skills portal running at http://localhost:{port}")
-
-
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
@@ -69,7 +41,6 @@ async def main():
     clear_email(conn)
     conn.close()
 
-    await setup_mock_server()
 
     if args.agent_workspace:
         initial_ws = os.path.join(

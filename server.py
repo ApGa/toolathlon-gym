@@ -22,11 +22,15 @@ import os
 import random
 import re
 import shutil
+import tempfile
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
 from uuid import uuid4
+
+from http_fixtures import HTTPFixture, copy_task
+from task_setup import run_preprocess
 
 import yaml
 from pydantic import BaseModel, Field
@@ -641,6 +645,9 @@ class ToolathlonGym(Environment):
         super().__init__(task_spec, secrets)
         self.task_name: str = task_spec.get("task_name", "")
         self.task_dir = TASKS_ROOT / self.task_name
+        self._source_task_dir = self.task_dir
+        self._session_dir: Path | None = None
+        self._http_fixture: HTTPFixture | None = None
         self.workspace_dir = Path(f"/tmp/workspaces/{uuid4()}")
         # Per-session Postgres DB cloned from `toolathlon_template` so tasks
         # can never see each other's mutations, even when sessions share a pod.
@@ -708,22 +715,35 @@ class ToolathlonGym(Environment):
         except BaseException:
             # The framework only calls teardown() once the env is registered
             # in active_envs, which happens AFTER setup() returns. If we fail
-            # mid-setup, drop the DB ourselves so we don't leak.
+            # mid-setup, release all resources ourselves so we don't leak.
             try:
-                await self._psql(
-                    f'DROP DATABASE IF EXISTS "{self._db_name}" WITH (FORCE);'
-                )
-            except Exception:
-                pass
+                await self.teardown()
+            except Exception as exc:
+                print(f"[setup] Cleanup failed task={self.task_name} session={self._db_name}: {exc}", flush=True)
             raise
 
     async def _setup_after_db(self):
+        # Preprocessors and graders sometimes write next to __file__. Keep the
+        # image immutable and make those paths private and user-owned too.
+        if not (self._source_task_dir / "task_config.json").is_file():
+            raise ValueError(f"Unknown task: {self.task_name!r}")
+        self._session_dir = Path(tempfile.mkdtemp(prefix=f"toolathlon-{self._db_name}-"))
+        self.task_dir = self._session_dir / "task"
+        copy_task(self._source_task_dir, self.task_dir)
+
         # Load task config
         config_path = self.task_dir / "task_config.json"
         if config_path.exists():
             self._task_config = json.loads(config_path.read_text())
 
         needed_servers = self._task_config.get("needed_mcp_servers", [])
+
+        if spec := self._task_config.get("http_fixture"):
+            self._http_fixture = HTTPFixture(self.task_dir, self._session_dir, spec)
+            self._http_fixture.start()
+            # Prompts, initial text inputs, database seed URLs in preprocessing,
+            # and grader expectations all use the episode's actual endpoint.
+            self._http_fixture.rewrite_tree(self.task_dir)
 
         # Build the per-task tool index used by both the system-prompt catalog
         # and the meta-tools. Every tool is exposed with a `server.bare`
@@ -760,32 +780,24 @@ class ToolathlonGym(Environment):
         for subdir in ["arxiv_local_storage", "memory", ".playwright_output"]:
             (self.workspace_dir / subdir).mkdir(exist_ok=True)
 
-        # Run preprocess script
-        # Note: some preprocess scripts spawn background servers (e.g. http.server)
-        # that inherit pipes, so we must not use communicate() which waits for EOF.
-        # Instead, use DEVNULL and wait with a timeout.
-        preprocess = self.task_dir / "preprocess" / "main.py"
-        if preprocess.exists():
-            proc = await asyncio.create_subprocess_exec(
-                "python3", str(preprocess),
-                "--agent_workspace", str(self.workspace_dir),
-                "--launch_time", self._launch_time,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                cwd=str(self.task_dir / "preprocess"),
-                env={**os.environ, **self._pg_env()},
-            )
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=30)
-                if proc.returncode != 0:
-                    print(f"[setup] Preprocess warning (rc={proc.returncode})", flush=True)
-            except asyncio.TimeoutError:
-                print("[setup] Preprocess timed out (30s), continuing anyway", flush=True)
+        await run_preprocess(
+            self.task_dir / "preprocess" / "main.py", self.workspace_dir,
+            self._session_dir / "preprocess.log", task=self.task_name,
+            session=self._db_name, launch_time=self._launch_time,
+            env={**os.environ, **self._pg_env()},
+        )
+        if self._http_fixture is not None:
+            self._http_fixture.rewrite_tree(self.workspace_dir)
+            self._http_fixture.check_ready()
 
         # Start MCP servers
         if needed_servers:
             self._mcp_bridge = MCPBridge(needed_servers, str(self.workspace_dir), self._pg_env())
             await self._mcp_bridge.start()
+
+    def _fixture_urls(self, value: Any) -> Any:
+        fixture = getattr(self, "_http_fixture", None)
+        return fixture.rewrite(value) if fixture is not None else value
 
     def get_prompt(self) -> Sequence[TextBlock]:
         parts = []
@@ -930,9 +942,9 @@ class ToolathlonGym(Environment):
         if mcp_tool_name in self._mcp_tool_names and self._mcp_bridge:
             try:
                 result_text = await self._mcp_bridge.call_tool(
-                    mcp_tool_name, input, server=explicit_server
+                    mcp_tool_name, self._fixture_urls(input), server=explicit_server
                 )
-                result_text = _safe_mcp_output(result_text)
+                result_text = _safe_mcp_output(self._fixture_urls(result_text))
                 return RunToolOutput(RunToolSuccess(
                     output=ToolOutput(blocks=[TextBlock(text=result_text)])
                 ))
@@ -975,7 +987,7 @@ class ToolathlonGym(Environment):
 
         try:
             result_text = await self._mcp_bridge.call_tool(
-                entry["bare_name"], dict(params.arguments), server=entry["server"]
+                entry["bare_name"], self._fixture_urls(dict(params.arguments)), server=entry["server"]
             )
         except Exception as exc:
             return _tool_error_output(
@@ -983,7 +995,7 @@ class ToolathlonGym(Environment):
                 kind="mcp_tool_error",
             )
 
-        result_text = _safe_mcp_output(result_text)
+        result_text = _safe_mcp_output(self._fixture_urls(result_text))
         return ToolOutput(blocks=[TextBlock(text=result_text)])
 
     @tool
@@ -1046,7 +1058,7 @@ class ToolathlonGym(Environment):
     async def python_execute(self, params: PythonExecuteInput) -> ToolOutput:
         """Execute Python code in the workspace and return stdout/stderr."""
         code_file = self.workspace_dir / f"_exec_{uuid4().hex[:8]}.py"
-        code_file.write_text(params.code)
+        code_file.write_text(self._fixture_urls(params.code))
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -1057,8 +1069,8 @@ class ToolathlonGym(Environment):
                 env={**os.environ, **self._pg_env()},
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-            output = stdout.decode()
-            errors = stderr.decode()
+            output = self._fixture_urls(stdout.decode())
+            errors = self._fixture_urls(stderr.decode())
             result = ""
             if output:
                 result += f"stdout:\n{output}\n"
@@ -1086,9 +1098,25 @@ class ToolathlonGym(Environment):
             code_file.unlink(missing_ok=True)
 
     async def teardown(self):
+        failures = []
+        cancelled = None
         if self._mcp_bridge:
-            await self._mcp_bridge.close()
+            try:
+                await self._mcp_bridge.close()
+            except asyncio.CancelledError as exc:
+                # Rollout cancellation must still release the episode's
+                # fixture, files, and database before it propagates.
+                cancelled = exc
+            except Exception as exc:
+                failures.append(f"MCP cleanup: {exc}")
+        if self._http_fixture is not None:
+            try:
+                self._http_fixture.close()
+            except Exception as exc:
+                failures.append(f"HTTP fixture cleanup: {exc}")
         shutil.rmtree(self.workspace_dir, ignore_errors=True)
+        if self._session_dir is not None:
+            shutil.rmtree(self._session_dir, ignore_errors=True)
         # Drop the per-session DB. Best-effort: a leak just means the next
         # entrypoint.sh sweep will collect it.
         try:
@@ -1097,6 +1125,10 @@ class ToolathlonGym(Environment):
             )
         except Exception as e:
             print(f"[teardown] DROP DATABASE {self._db_name} failed: {e}", flush=True)
+        if cancelled is not None:
+            raise cancelled
+        if failures:
+            raise RuntimeError("; ".join(failures))
 
     @classmethod
     def list_splits(cls) -> list[str]:

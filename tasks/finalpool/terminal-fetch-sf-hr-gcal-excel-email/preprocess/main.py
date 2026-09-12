@@ -1,13 +1,12 @@
-"""Preprocess for terminal-fetch-sf-hr-gcal-excel-email.
-Clears gcal and email writable schemas. Extracts mock pages and starts HTTP server on port 30405.
-Snowflake HR data is read-only."""
+"""Prepare task data for terminal-fetch-sf-hr-gcal-excel-email.
+
+HTTP fixture lifecycle is managed by the environment server (task_config.json).
+"""
 import argparse
 import asyncio
 import json
 import os
 import glob as globmod
-import shutil
-import tarfile
 import uuid
 import psycopg2
 
@@ -16,8 +15,6 @@ DB_CONFIG = {
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel",
 }
-
-TASK_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def clear_db():
@@ -78,36 +75,6 @@ def ensure_email_folder():
     conn.close()
 
 
-async def setup_mock_server():
-    """Extract mock_pages.tar.gz and start HTTP server on port 30405."""
-    files_dir = os.path.join(TASK_ROOT, "files")
-    tmp_dir = os.path.join(TASK_ROOT, "tmp")
-
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    tar_path = os.path.join(files_dir, "mock_pages.tar.gz")
-    with tarfile.open(tar_path, "r:gz") as tar:
-        tar.extractall(path=tmp_dir)
-    print(f"[preprocess] Extracted {tar_path} to {tmp_dir}")
-
-    mock_dir = os.path.join(tmp_dir, "task5_mock_pages")
-    port = 30405
-
-    kill_proc = await asyncio.create_subprocess_shell(
-        f"kill -9 $(lsof -ti:{port}) 2>/dev/null",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    await kill_proc.wait()
-    await asyncio.sleep(0.5)
-
-    await asyncio.create_subprocess_shell(
-        f"nohup python3 -m http.server {port} --directory {mock_dir} "
-        f"> {mock_dir}/server.log 2>&1 &")
-    await asyncio.sleep(1)
-    print(f"[preprocess] Mock API server running at http://localhost:{port}")
-
-
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", type=str, required=False)
@@ -116,7 +83,6 @@ async def main():
 
     clear_db()
     ensure_email_folder()
-    await setup_mock_server()
 
     if args.agent_workspace:
         for pattern in ["Compensation_Benchmark_Report.xlsx", "compensation_analysis.py"]:
