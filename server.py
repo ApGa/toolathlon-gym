@@ -359,13 +359,14 @@ _TRANSIENT_PG_ERRORS = (
 
 # ── Template resolution (from original tool_servers.py) ──────────────────────
 
-def _resolve(value: str, workspace: str) -> str:
+def _resolve(value: str, workspace: str, task_dir: str = "") -> str:
     if not isinstance(value, str):
         return value
     return (
         value
         .replace("${local_servers_paths}", LOCAL_SERVERS)
         .replace("${agent_workspace}", workspace)
+        .replace("${task_dir}", task_dir)
     )
 
 
@@ -467,9 +468,13 @@ class _MCPProcess:
 class MCPBridge:
     """Manages MCP server subprocesses for a single session."""
 
-    def __init__(self, needed_servers: list[str], workspace_dir: str, pg_env: dict[str, str]):
+    def __init__(
+        self, needed_servers: list[str], workspace_dir: str, pg_env: dict[str, str],
+        *, task_dir: str = "",
+    ):
         self.needed_servers = needed_servers
         self.workspace_dir = workspace_dir
+        self.task_dir = task_dir
         # Env overrides (PGHOST, PGDATABASE, …) applied AFTER any YAML-set env
         # so e.g. `PG_DATABASE: "toolathlon"` in 12306.yaml gets overridden by
         # the per-session DB name.
@@ -495,10 +500,10 @@ class MCPBridge:
                 continue
 
             params = cfg.get("params", {})
-            command = _resolve(params.get("command", ""), self.workspace_dir)
-            args = [_resolve(a, self.workspace_dir) for a in params.get("args", [])]
-            env_vars = {k: _resolve(v, self.workspace_dir) for k, v in params.get("env", {}).items()}
-            cwd = _resolve(params.get("cwd", self.workspace_dir), self.workspace_dir)
+            command = _resolve(params.get("command", ""), self.workspace_dir, self.task_dir)
+            args = [_resolve(a, self.workspace_dir, self.task_dir) for a in params.get("args", [])]
+            env_vars = {k: _resolve(v, self.workspace_dir, self.task_dir) for k, v in params.get("env", {}).items()}
+            cwd = _resolve(params.get("cwd", self.workspace_dir), self.workspace_dir, self.task_dir)
 
             # For "uv run <script>" without --directory, infer cwd from script path
             if command == "uv" and "run" in args and "cwd" not in params:
@@ -792,7 +797,10 @@ class ToolathlonGym(Environment):
 
         # Start MCP servers
         if needed_servers:
-            self._mcp_bridge = MCPBridge(needed_servers, str(self.workspace_dir), self._pg_env())
+            self._mcp_bridge = MCPBridge(
+                needed_servers, str(self.workspace_dir), self._pg_env(),
+                task_dir=str(self.task_dir),
+            )
             await self._mcp_bridge.start()
 
     def _fixture_urls(self, value: Any) -> Any:

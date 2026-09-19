@@ -1,1 +1,5 @@
-{"email": "newsletter@fund.example.com", "name": "Fund Newsletter"}
+{
+  "email": "newsletter@fund.example.com",
+  "name": "Fund Newsletter",
+  "password": "unused"
+}

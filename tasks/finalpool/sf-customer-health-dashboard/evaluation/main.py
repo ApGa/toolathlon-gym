@@ -232,8 +232,8 @@ def check_notion():
     if pages:
         page_id = pages[0][0]
         cur.execute("""
-            SELECT content FROM notion.blocks
-            WHERE page_id = %s
+            SELECT block_data FROM notion.blocks
+            WHERE parent_id = %s AND archived = false AND in_trash = false
         """, (page_id,))
         blocks = cur.fetchall()
         check("Notion page has content blocks", len(blocks) > 0,

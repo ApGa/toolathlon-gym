@@ -88,6 +88,17 @@ python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
 ```
 
+Tasks that require an email sender provide an `email_config.json` account file.
+The emails MCP server loads this file from the episode's private task directory,
+so simultaneous episodes retain their own sender identities. Tasks without an
+account file use the email server's default account. These are PostgreSQL-backed
+simulated accounts; no external SMTP connection is made.
+
+The Notion evaluator integration tests also run when `TOOLATHLON_TEST_PG_DSN`
+points to a disposable PostgreSQL database. They use the image's seed schema
+inside transactions that are rolled back after each test. CI supplies this
+database automatically.
+
 ## License
 
 [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0).
