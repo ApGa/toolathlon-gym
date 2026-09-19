@@ -58,10 +58,14 @@ class TaskAccountsTest(unittest.IsolatedAsyncioTestCase):
                 environments.append(environment)
 
             process = SimpleNamespace(returncode=None)
-            mcp_process = SimpleNamespace(initialize=AsyncMock(return_value=True), close=AsyncMock())
+            tools = [{"name": "send_email", "inputSchema": {}}]
+            mcp_process = SimpleNamespace(
+                initialize=AsyncMock(return_value=True), list_tools=AsyncMock(return_value=tools),
+                close=AsyncMock(),
+            )
             with (
                 patch("server.CONFIGS_DIR", ROOT / "configs/mcp_servers"),
-                patch("server.ALL_TOOL_SCHEMAS", {"emails": []}),
+                patch("server.ALL_TOOL_SCHEMAS", {"emails": tools}),
                 patch("server.run_preprocess", new_callable=AsyncMock),
                 patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=process) as spawn,
                 patch("server._MCPProcess", return_value=mcp_process),

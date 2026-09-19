@@ -122,7 +122,7 @@ class ToolRoutingTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_mcp_is_error_result_raises(self) -> None:
-        process = _MCPProcess("server", SimpleNamespace())
+        process = _MCPProcess("server", SimpleNamespace(stderr=None))
         process.send_recv = AsyncMock(
             return_value={
                 "result": {
@@ -136,7 +136,7 @@ class ToolRoutingTest(unittest.IsolatedAsyncioTestCase):
             await process.call_tool("tool", {"bad": True})
 
     async def test_mcp_success_result_is_unchanged(self) -> None:
-        process = _MCPProcess("server", SimpleNamespace())
+        process = _MCPProcess("server", SimpleNamespace(stderr=None))
         process.send_recv = AsyncMock(
             return_value={
                 "result": {
