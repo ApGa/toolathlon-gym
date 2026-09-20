@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import os
+from pathlib import Path
 import signal
 
 
@@ -12,6 +13,33 @@ class ProcessResult:
     returncode: int
     stdout: str
     stderr: str
+
+
+def process_group_is_alive(pgid: int) -> bool:
+    """Check for running members, excluding exited Linux zombie processes.
+
+    killpg(pgid, 0) also succeeds for zombie-only groups. Sending SIGKILL to
+    those groups cannot remove them; they must be reaped by their parent.
+    This check is used by the PBS MCP cleanup layer after closing the leader.
+    """
+    if pgid <= 0:
+        raise ValueError("Expected a positive, owned process-group ID")
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    for directory in Path("/proc").iterdir():
+        if not directory.name.isdigit():
+            continue
+        try:
+            if os.getpgid(int(directory.name)) != pgid:
+                continue
+            fields = (directory / "stat").read_text().rsplit(")", 1)[1].split()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        if int(fields[2]) == pgid and fields[0] not in ("Z", "X", "x"):
+            return True
+    return False
 
 
 async def _read_output(stream, limit: int) -> str:

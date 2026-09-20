@@ -1,4 +1,5 @@
 from typing import Any, List, Dict, Optional, Tuple
+from functools import wraps
 import PyPDF2
 import io
 import os
@@ -17,6 +18,18 @@ import json
 
 # Global variables
 mcp = FastMCP("pdf-tools")
+
+
+def _safe_unicode_result(function):
+    """Keep malformed PDF text/metadata from crashing the MCP JSON transport."""
+    @wraps(function)
+    async def wrapped(*args, **kwargs):
+        text = await function(*args, **kwargs)
+        # Preserve valid surrogate pairs (e.g. emoji), replacing only unpaired
+        # surrogates with U+FFFD. UTF-8 serialization otherwise kills the server.
+        return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+    return wrapped
+
 WORKSPACE_PATH = None
 TEMPFILE_DIR = None
 
@@ -378,6 +391,7 @@ def validate_page_size(page_size: int) -> Tuple[int, str]:
     return page_size, warning
 
 @mcp.tool()
+@_safe_unicode_result
 async def read_pdf_pages(pdf_file_path: str, start_page: int = 1, end_page: int = 1) -> str:
     """Read content from PDF file for specified page range.
     
@@ -430,6 +444,7 @@ async def read_pdf_pages(pdf_file_path: str, start_page: int = 1, end_page: int 
         return f"Error reading PDF file: {str(e)}"
 
 @mcp.tool()
+@_safe_unicode_result
 async def get_pdf_info(pdf_file_path: str) -> str:
     """Get basic information about a PDF file including page count.
     
@@ -480,6 +495,7 @@ async def get_pdf_info(pdf_file_path: str) -> str:
         return f"Error getting PDF information: {str(e)}"
 
 @mcp.tool()
+@_safe_unicode_result
 async def merge_pdfs(pdf_paths: List[str], output_path: str) -> str:
     """Merge multiple PDF files into one.
     
@@ -548,6 +564,7 @@ async def merge_pdfs(pdf_paths: List[str], output_path: str) -> str:
         return f"Error merging PDFs: {str(e)}"
 
 @mcp.tool()
+@_safe_unicode_result
 async def extract_pdf_pages(source_path: str, page_numbers: List[int], output_path: str) -> str:
     """Extract specific pages from a PDF and create a new PDF.
     
@@ -613,6 +630,7 @@ async def extract_pdf_pages(source_path: str, page_numbers: List[int], output_pa
         return f"Error extracting pages: {str(e)}"
 
 @mcp.tool()
+@_safe_unicode_result
 async def search_pdf_content(pdf_file_path: str, pattern: str, page_size: int = 10) -> str:
     """Search for regex pattern in PDF content and return paginated results.
     
@@ -707,6 +725,7 @@ async def search_pdf_content(pdf_file_path: str, pattern: str, page_size: int = 
         return f"Error searching PDF: {str(e)}"
 
 @mcp.tool()
+@_safe_unicode_result
 async def search_pdf_next_page(search_id: str) -> str:
     """Get next page of search results.
     
@@ -747,6 +766,7 @@ async def search_pdf_next_page(search_id: str) -> str:
         return result
 
 @mcp.tool()
+@_safe_unicode_result
 async def search_pdf_prev_page(search_id: str) -> str:
     """Get previous page of search results.
     
@@ -788,6 +808,7 @@ async def search_pdf_prev_page(search_id: str) -> str:
         return result
 
 @mcp.tool()
+@_safe_unicode_result
 async def search_pdf_go_page(search_id: str, page_number: int) -> str:
     """Go to specific page of search results.
     
@@ -830,6 +851,7 @@ async def search_pdf_go_page(search_id: str, page_number: int) -> str:
         return result
 
 @mcp.tool()
+@_safe_unicode_result
 async def search_pdf_info(search_id: str) -> str:
     """Get information about a search session.
     

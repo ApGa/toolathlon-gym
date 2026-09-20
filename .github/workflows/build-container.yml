@@ -51,6 +51,13 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements.txt
       - run: python -m unittest discover -s tests -v
+      - run: pip install PyPDF2 requests
+      - run: python -m unittest discover -s local_servers/pdf-tools-mcp/tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci && npm run build && node --max-old-space-size=96 --test tests/runtime-limits.mjs
+        working-directory: local_servers/playwright-mcp
 
   build:
     needs: test

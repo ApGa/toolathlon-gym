@@ -158,6 +158,17 @@ deadline. Timeout or cancellation kills the invocation's process group,
 including its children. Captured stdout and stderr are each limited to 1 MiB;
 larger results should be written to workspace files.
 
+PDF tools replace unpaired Unicode surrogates in text, metadata, and error
+responses so an invalid PDF string cannot terminate the MCP JSON transport.
+Valid Unicode, including supplementary characters, is preserved.
+
+Browser tools retain the most recent 1000 console messages and network
+requests per tab. Console text is limited to 2000 characters, and snapshots
+consume up to 50 new console messages without repeating them on later calls.
+The PBS cleanup layer uses `task_process.process_group_is_alive` to distinguish
+exited zombie processes from live members; live process groups still require
+cleanup and verification.
+
 ## Environment Difficulty
 
 Tasks require coordinating multiple tools across different domains. Most tasks involve 4-8 MCP servers and require multi-step reasoning, data transformation, and file generation.

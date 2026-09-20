@@ -22,7 +22,7 @@ const console = defineTabTool({
   schema: {
     name: 'browser_console_messages',
     title: 'Get console messages',
-    description: 'Returns all console messages',
+    description: 'Returns up to the 1000 most recent console messages. Long messages are truncated to 2000 characters.',
     inputSchema: z.object({}),
     type: 'readOnly',
   },

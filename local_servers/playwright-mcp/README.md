@@ -414,7 +414,7 @@ http.createServer(async (req, res) => {
 
 - **browser_console_messages**
   - Title: Get console messages
-  - Description: Returns all console messages
+  - Description: Returns up to the 1000 most recent console messages. Long messages are truncated to 2000 characters.
   - Parameters: None
   - Read-only: **true**
 
@@ -499,7 +499,7 @@ http.createServer(async (req, res) => {
 
 - **browser_network_requests**
   - Title: List network requests
-  - Description: Returns all network requests since loading the page
+  - Description: Returns up to the 1000 most recent network requests since loading the page.
   - Parameters: None
   - Read-only: **true**
 

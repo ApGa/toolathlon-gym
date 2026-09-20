@@ -90,7 +90,9 @@ done && wait
 # Install the browser for the Node Playwright MCP package, not just the Python
 # playwright package in /opt/venv. Otherwise browser_install tries to download
 # at runtime, which is slow and often unavailable on HPC nodes.
-RUN cd /opt/local_servers/playwright-mcp && npx playwright install chromium
+RUN cd /opt/local_servers/playwright-mcp && npm run build && \
+    node --max-old-space-size=96 --test tests/runtime-limits.mjs && \
+    npx playwright install chromium
 
 # These servers need pg for their Toolathlon PG-backed forks
 RUN cd /opt/local_servers/woocommerce-mcp && npm install pg @types/pg && npm run build
