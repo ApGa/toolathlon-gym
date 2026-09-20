@@ -80,7 +80,7 @@ def main():
 
     # 2. Check "By Issue Type" sheet
     print("  Checking By Issue Type...")
-    cur.execute("SELECT id FROM gsheet.sheets WHERE spreadsheet_id = %s AND title ILIKE '%Issue Type%'", (ss_id,))
+    cur.execute("SELECT id FROM gsheet.sheets WHERE spreadsheet_id = %s AND title ILIKE %s", (ss_id, "%Issue Type%"))
     sheet_rows = cur.fetchall()
     if not sheet_rows:
         db_errors.append("Sheet 'By Issue Type' not found")
@@ -123,7 +123,7 @@ def main():
 
     # 3. Check "By Priority" sheet
     print("  Checking By Priority...")
-    cur.execute("SELECT id FROM gsheet.sheets WHERE spreadsheet_id = %s AND title ILIKE '%Priority%'", (ss_id,))
+    cur.execute("SELECT id FROM gsheet.sheets WHERE spreadsheet_id = %s AND title ILIKE %s", (ss_id, "%Priority%"))
     sheet_rows = cur.fetchall()
     if not sheet_rows:
         db_errors.append("Sheet 'By Priority' not found")

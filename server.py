@@ -31,6 +31,7 @@ from uuid import uuid4
 
 from http_fixtures import HTTPFixture, copy_task
 from task_setup import run_preprocess
+from task_process import run_task_process
 
 import yaml
 from pydantic import BaseModel, Field
@@ -808,7 +809,12 @@ class ToolathlonGym(Environment):
         return fixture.rewrite(value) if fixture is not None else value
 
     def get_prompt(self) -> Sequence[TextBlock]:
-        parts = []
+        parts = [
+            f"Task launch time: {self._launch_time_display}.\n"
+            "Use this as the reference for today, now, and dates relative to "
+            "the task's launch time. The operating-system clock may differ; "
+            "it does not change the task's reference date."
+        ]
 
         # Read agent system prompt
         sys_prompt_path = self.task_dir / "docs" / "agent_system_prompt.md"
@@ -1021,19 +1027,17 @@ class ToolathlonGym(Environment):
         groundtruth = self.task_dir / "groundtruth_workspace"
 
         try:
-            proc = await asyncio.create_subprocess_exec(
+            proc = await run_task_process(
                 "python3", str(eval_script),
                 "--agent_workspace", str(self.workspace_dir),
                 "--groundtruth_workspace", str(groundtruth),
                 "--launch_time", self._launch_time,
                 "--res_log_file", str(res_log),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.task_dir / "evaluation"),
                 env={**os.environ, **self._pg_env()},
+                timeout=120,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-            output = stdout.decode() + stderr.decode()
+            output = proc.stdout + proc.stderr
 
             if proc.returncode == 0:
                 reward = _reward_for_evaluation(1.0, res_log, output)
@@ -1069,16 +1073,14 @@ class ToolathlonGym(Environment):
         code_file.write_text(self._fixture_urls(params.code))
 
         try:
-            proc = await asyncio.create_subprocess_exec(
+            proc = await run_task_process(
                 "python3", str(code_file),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.workspace_dir),
                 env={**os.environ, **self._pg_env()},
+                timeout=60,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-            output = self._fixture_urls(stdout.decode())
-            errors = self._fixture_urls(stderr.decode())
+            output = self._fixture_urls(proc.stdout)
+            errors = self._fixture_urls(proc.stderr)
             result = ""
             if output:
                 result += f"stdout:\n{output}\n"

@@ -10,6 +10,7 @@ on:
       - server.py
       - http_fixtures.py
       - task_setup.py
+      - task_process.py
       - requirements.txt
       - tests/**
       - entrypoint.sh

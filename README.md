@@ -147,6 +147,17 @@ Each task exposes tools from its required MCP servers. Examples include `read_fi
 
 Multi-turn. Agents read task instructions, use MCP tools to gather data, create files, query databases, and perform analysis, then call `claim_done` for evaluation.
 
+The prompt always includes the launch time passed to task graders. Relative
+dates use that reference even when `OPENREWARD_FROZEN_DATE` differs from the
+machine's clock. The Fireship technology report is graded against the seeded
+video database and the report's topic aggregates, rather than the illustrative
+reference workbook.
+
+Python execution has a 60-second deadline and evaluation has a 120-second
+deadline. Timeout or cancellation kills the invocation's process group,
+including its children. Captured stdout and stderr are each limited to 1 MiB;
+larger results should be written to workspace files.
+
 ## Environment Difficulty
 
 Tasks require coordinating multiple tools across different domains. Most tasks involve 4-8 MCP servers and require multi-step reasoning, data transformation, and file generation.

@@ -14,6 +14,8 @@ import os
 import sys
 import json
 from argparse import ArgumentParser
+from collections import defaultdict
+from datetime import datetime
 
 import psycopg2
 import openpyxl
@@ -127,43 +129,79 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         else:
             record("Topic_Summary has Topic and Video_Count columns", False, "Sheet is empty")
 
-    # --- Groundtruth XLSX value comparison ---
-    gt_path = os.path.join(groundtruth_workspace, "Tech_Trend_Report.xlsx")
-    if os.path.isfile(gt_path):
-        gt_wb = openpyxl.load_workbook(gt_path, data_only=True)
-        for gt_sname in gt_wb.sheetnames:
-            gt_ws = gt_wb[gt_sname]
-            a_ws = None
-            for asn in wb.sheetnames:
-                if asn.strip().lower() == gt_sname.strip().lower():
-                    a_ws = wb[asn]
-                    break
-            if a_ws is None:
-                record(f"GT sheet '{gt_sname}' exists in agent xlsx", False, f"Available: {wb.sheetnames}")
-                continue
-            gt_rows = [r for r in gt_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-            a_rows = [r for r in a_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-            record(f"GT '{gt_sname}' row count", len(a_rows) == len(gt_rows),
-                   f"Expected {len(gt_rows)}, got {len(a_rows)}")
-            for ri in range(min(3, len(gt_rows))):
-                if ri >= len(a_rows):
-                    break
-                ok = True
-                for ci in range(min(len(gt_rows[ri]), len(a_rows[ri]))):
-                    gv, av = gt_rows[ri][ci], a_rows[ri][ci]
-                    if gv is None:
-                        continue
-                    if isinstance(gv, (int, float)):
-                        if not num_close(av, gv, max(abs(gv) * 0.1, 1.0)):
-                            ok = False
-                            break
-                    else:
-                        if not str_match(av, gv):
-                            ok = False
-                            break
-                record(f"GT '{gt_sname}' row {ri+1} values", ok,
-                       f"gt={gt_rows[ri][:4]}, agent={a_rows[ri][:4] if ri < len(a_rows) else 'missing'}")
-        gt_wb.close()
+    # The bundled workbook contains illustrative videos absent from the seeded
+    # database. Grade the data the agent can actually retrieve instead.
+    if videos_key and topic_key:
+        check_seeded_video_data(wb[videos_key], wb[topic_key])
+    wb.close()
+
+
+def _sheet_records(sheet, required):
+    rows = list(sheet.iter_rows(values_only=True))
+    headers = [str(value or "").strip().lower().replace(" ", "_") for value in rows[0]] if rows else []
+    missing = set(required) - set(headers)
+    record(f"{sheet.title} has required data columns", not missing, f"Missing: {sorted(missing)}")
+    if missing:
+        return None
+    return [dict(zip(headers, row)) for row in rows[1:] if any(value is not None for value in row)]
+
+
+def check_seeded_video_data(videos_sheet, summary_sheet):
+    columns = ("video_id", "title", "published_date", "duration_seconds", "view_count", "like_count", "primary_topic")
+    videos = _sheet_records(videos_sheet, columns)
+    topics = _sheet_records(summary_sheet, ("topic", "video_count", "total_views", "avg_duration"))
+    if videos is None or topics is None:
+        return
+    conn = psycopg2.connect(**DB_CONFIG)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT video_id, title, published_at, duration, view_count, like_count
+                FROM youtube.videos
+                WHERE channel_title = 'Fireship'
+                  AND published_at >= '2024-01-01' AND published_at < '2026-01-01'
+                ORDER BY view_count DESC, video_id
+                LIMIT 10
+            """)
+            expected = cur.fetchall()
+    finally:
+        conn.close()
+    expected_by_id = {row[0]: row for row in expected}
+    actual_ids = [str(row["video_id"]) for row in videos]
+    record("Videos contain exactly the top 10 seeded videos", len(videos) == 10 and len(expected) == 10
+           and set(actual_ids) == set(expected_by_id), f"Found IDs: {actual_ids}")
+    # Topic names are inferred by the agent; check their aggregates, not an
+    # arbitrary taxonomy from the example workbook.
+    aggregates = defaultdict(lambda: [0, 0, 0])
+    for row in videos:
+        video_id = str(row["video_id"])
+        reference = expected_by_id.get(video_id)
+        if reference is None:
+            continue
+        _, title, published, duration, views, likes = reference
+        value = row["published_date"]
+        date_text = value.date().isoformat() if isinstance(value, datetime) else str(value)[:10]
+        correct = str_match(row["title"], title) and date_text == published.date().isoformat()
+        correct &= all(num_close(row[key], expected_value, 1.0) for key, expected_value in (
+            ("duration_seconds", duration), ("view_count", views), ("like_count", likes),
+        ))
+        record(f"Seeded values for {video_id}", correct)
+        topic = str(row["primary_topic"] or "").strip().lower()
+        record(f"Primary topic for {video_id}", bool(topic))
+        aggregate = aggregates[topic]
+        aggregate[0] += 1
+        aggregate[1] += views
+        aggregate[2] += float(duration)
+    names = [str(row["topic"] or "").strip().lower() for row in topics]
+    record("Topic_Summary covers each assigned topic once", len(names) == len(set(names))
+           and set(names) == set(aggregates))
+    for row, topic in zip(topics, names):
+        if topic not in aggregates:
+            continue
+        count, views, duration = aggregates[topic]
+        correct = num_close(row["video_count"], count, 0) and num_close(row["total_views"], views, 1.0)
+        correct &= num_close(row["avg_duration"], duration / count, 1.0)
+        record(f"Aggregates for topic {topic}", correct)
 
 
 def check_notion():

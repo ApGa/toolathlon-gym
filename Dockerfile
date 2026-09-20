@@ -170,7 +170,7 @@ COPY configs/ /app/configs/
 COPY db/ /app/db/
 COPY runtime_patches/ /app/runtime_patches/
 COPY server.py /app/server.py
-COPY http_fixtures.py task_setup.py /app/
+COPY http_fixtures.py task_setup.py task_process.py /app/
 COPY discover_tools.py /app/discover_tools.py
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh

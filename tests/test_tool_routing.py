@@ -155,10 +155,10 @@ class ToolRoutingTest(unittest.IsolatedAsyncioTestCase):
             environment._pg_env = lambda: {}
             process = SimpleNamespace(
                 returncode=7,
-                communicate=AsyncMock(return_value=(b"partial output\n", b"boom\n")),
+                stdout="partial output\n", stderr="boom\n",
             )
             with patch(
-                "server.asyncio.create_subprocess_exec",
+                "server.run_task_process",
                 new=AsyncMock(return_value=process),
             ):
                 result = await environment.python_execute(
