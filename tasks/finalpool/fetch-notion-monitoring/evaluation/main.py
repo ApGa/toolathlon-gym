@@ -15,6 +15,7 @@ import sys
 
 import openpyxl
 import psycopg2
+from grader_helpers import rich_text
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
@@ -210,7 +211,7 @@ def check_notion():
                 if title_parts:
                     break
 
-        page_title = "".join(p.get("plain_text", "") for p in title_parts)
+        page_title = rich_text(title_parts)
         page_title_lower = page_title.lower()
 
         # Match pages with monitoring, dashboard, or service in title

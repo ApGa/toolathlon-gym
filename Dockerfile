@@ -187,6 +187,7 @@ RUN service postgresql start && \
     until pg_isready -U eigent 2>/dev/null; do sleep 0.5; done && \
     psql -U eigent -d postgres -c "CREATE DATABASE toolathlon_template OWNER eigent;" && \
     gunzip -c /app/db/init.sql.gz | psql -U eigent -d toolathlon_template -v ON_ERROR_STOP=1 && \
+    psql -U eigent -d toolathlon_template -v ON_ERROR_STOP=1 -f /app/db/normalize_wc_categories.sql && \
     PGHOST=localhost PGDATABASE=toolathlon_template PG_DATABASE=toolathlon_template \
         python3 /app/discover_tools.py && \
     psql -U eigent -d postgres -c "UPDATE pg_database SET datistemplate = true WHERE datname = 'toolathlon_template';" && \

@@ -1,10 +1,10 @@
 """Evaluation script for wc-customer-gform-excel-notion."""
+import argparse
+import json
 import os
-import argparse, json, os, sys
+import sys
 import openpyxl
-
-def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
-    return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
+from grader_helpers import records, close, text
 
 
 DB_CONFIG = {
@@ -26,97 +26,82 @@ def check(name, condition, detail=""):
         detail_str = str(detail)[:200] if detail else ""
         print(f"  [FAIL] {name}: {detail_str}")
 
-def safe_float(val, default=None):
-    try:
-        if val is None: return default
-        return float(str(val).replace(",", "").replace("%", "").replace("$", "").strip())
-    except (ValueError, TypeError):
-        return default
 
 def get_conn():
     import psycopg2
     return psycopg2.connect(**DB_CONFIG)
 
+def check_customer_data(wb, customers):
+    segments = records(wb, "Customer_Segments", ("segment", "customer_count", "total_revenue", "avg_spend", "avg_orders"), check)
+    top = records(wb, "Top_Customers", ("customer_name", "email", "total_spent", "order_count", "segment"), check)
+    strategies = records(wb, "Segment_Strategy", ("segment", "engagement_strategy", "retention_risk", "target_action"), check)
+    def tier(spend):
+        return "VIP" if float(spend) > 500 else "Regular" if float(spend) >= 100 else "New"
+    totals = {}
+    for name, email, spend, orders in customers:
+        values = totals.setdefault(tier(spend), [0, 0.0, 0])
+        values[0] += 1
+        values[1] += float(spend)
+        values[2] += orders
+    by_segment = {text(r["segment"]): r for r in segments}
+    check("All customer segments represented once", len(segments) == len(totals)
+          and set(by_segment) == {text(t) for t in totals})
+    for segment, (count, revenue, orders) in totals.items():
+        row = by_segment.get(text(segment), {})
+        check(f"{segment} statistics match store data", all(close(row.get(key), value, tol)
+              for key, value, tol in [("customer_count", count, 0), ("total_revenue", revenue, .02),
+                                      ("avg_spend", revenue / count, .02), ("avg_orders", orders / count, .06)]))
+    check("Segments sorted by revenue", [text(r["segment"]) for r in segments] ==
+          [text(t) for t in sorted(totals, key=lambda t: totals[t][1], reverse=True)])
+    # Ties in spending may be reported in any order.
+    expected = sorted(customers, key=lambda r: float(r[2]), reverse=True)[:10]
+    by_email = {text(r[1]): r for r in customers}
+    threshold = float(expected[-1][2]) if expected else 0
+    emails = [text(r["email"]) for r in top]
+    check("Top customers contains ten distinct store customers", len(top) == len(expected)
+          and len(set(emails)) == len(top) and all(e in by_email for e in emails)
+          and {text(r[1]) for r in customers if float(r[2]) > threshold}.issubset(emails))
+    previous = float("inf")
+    for row in top:
+        customer = by_email.get(text(row["email"]))
+        if customer is None:
+            continue
+        name, email, spend, orders = customer
+        check(f"Top customer {email} values", text(row["customer_name"]) == text(name)
+              and close(row["total_spent"], spend, .02) and close(row["order_count"], orders, 0)
+              and text(row["segment"]) == text(tier(spend)) and threshold <= float(spend) <= previous)
+        previous = float(spend)
+    check("Strategies cover every segment", {text(r["segment"]) for r in strategies} == {text(t) for t in totals}
+          and all(all(text(r[k]) for k in ("engagement_strategy", "retention_risk", "target_action")) for r in strategies))
+
+
 def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_file):
     global PASS_COUNT, FAIL_COUNT
-    PASS_COUNT = 0
-    FAIL_COUNT = 0
-
-    # Check Customer_Insights_Report.xlsx
-    excel_path = os.path.join(agent_workspace, "Customer_Insights_Report.xlsx")
-    check("Customer_Insights_Report.xlsx exists", os.path.exists(excel_path))
-    if os.path.exists(excel_path):
-        wb = openpyxl.load_workbook(excel_path)
-        gt_path = os.path.join(groundtruth_workspace, "Customer_Insights_Report.xlsx")
-        gt_wb = openpyxl.load_workbook(gt_path) if os.path.exists(gt_path) else None
-
-        if gt_wb:
-            for sheet_name in gt_wb.sheetnames:
-                check(f"{sheet_name} sheet exists", sheet_name in wb.sheetnames)
-                if sheet_name in wb.sheetnames:
-                    ws = wb[sheet_name]
-                    gt_ws = gt_wb[sheet_name]
-                    # Check headers
-                    gt_headers = [str(c.value).strip().lower() if c.value else "" for c in gt_ws[1]]
-                    headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-                    for h in gt_headers:
-                        if h:
-                            check(f"{sheet_name} has {h} column", h in headers, f"headers: {headers[:10]}")
-                    # Check row count
-                    gt_rows = list(gt_ws.iter_rows(min_row=2, values_only=True))
-                    data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-                    min_rows = max(1, len(gt_rows) - 2)
-                    check(f"{sheet_name} has >= {min_rows} data rows", len(data_rows) >= min_rows, f"got {len(data_rows)}")
-
-                    # Cell value comparison against groundtruth
-                    header_map = {h: i for i, h in enumerate(headers)}
-                    gt_header_map = {h: i for i, h in enumerate(gt_headers)}
-                    for ri in range(min(3, len(gt_rows), len(data_rows))):
-                        gt_row = gt_rows[ri]
-                        agent_row = data_rows[ri]
-                        for ci, gt_h in enumerate(gt_headers):
-                            if not gt_h or ci >= len(gt_row):
-                                continue
-                            gv = gt_row[ci]
-                            agent_ci = header_map.get(gt_h)
-                            if agent_ci is None or agent_ci >= len(agent_row):
-                                continue
-                            av = agent_row[agent_ci]
-                            gf = safe_float(gv)
-                            af = safe_float(av)
-                            if gf is not None and af is not None:
-                                tol = max(0.5, abs(gf) * 0.15)
-                                check(f"{sheet_name} R{ri+2} {gt_h} ~{gf:.1f}",
-                                      abs(gf - af) <= tol, f"got {af}")
-                            elif gv is not None and av is not None:
-                                gs = str(gv).strip().lower()
-                                avs = str(av).strip().lower()
-                                if gs:
-                                    check(f"{sheet_name} R{ri+2} {gt_h} text",
-                                          gs == avs or gs in avs or avs in gs,
-                                          f"expected {gs[:50]}, got {avs[:50]}")
-
-    # Check Python script exists (terminal usage)
-    py_files = [f for f in os.listdir(agent_workspace) if f.endswith(".py")]
-    check("Python analysis script exists", len(py_files) >= 1, f"found: {py_files}")
-
-    # Database checks
+    PASS_COUNT = FAIL_COUNT = 0
+    path = os.path.join(agent_workspace, "Customer_Insights_Report.xlsx")
+    check("Customer_Insights_Report.xlsx exists", os.path.isfile(path))
+    conn = get_conn()
     try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM gform.forms")
-        form_count = cur.fetchone()[0]
-        check("Google Form created", form_count >= 1, f"form count: {form_count}")
-        cur.execute("SELECT COUNT(*) FROM gform.questions")
-        q_count = cur.fetchone()[0]
-        check("Form has questions", q_count >= 3, f"question count: {q_count}")
-        cur.execute("SELECT COUNT(*) FROM notion.pages WHERE archived = false")
-        page_count = cur.fetchone()[0]
-        check("Notion page created", page_count >= 1, f"page count: {page_count}")
+        with conn.cursor() as cur:
+            cur.execute("SELECT trim(concat_ws(' ', first_name, last_name)), email, total_spent, orders_count FROM wc.customers")
+            customers = cur.fetchall()
+            if os.path.isfile(path):
+                wb = openpyxl.load_workbook(path, data_only=True)
+                try:
+                    check_customer_data(wb, customers)
+                finally:
+                    wb.close()
+            cur.execute("SELECT id FROM gform.forms WHERE lower(title) = 'customer experience survey'")
+            forms = cur.fetchall()
+            check("Customer Experience Survey created", bool(forms))
+            if forms:
+                cur.execute("SELECT COUNT(*) FROM gform.questions WHERE form_id = %s", (forms[0][0],))
+                check("Survey contains four questions", cur.fetchone()[0] >= 4)
+            cur.execute("SELECT COUNT(*) FROM notion.pages WHERE archived = false AND properties::text ILIKE %s", ("%Customer Intelligence Hub%",))
+            check("Customer Intelligence Hub created", cur.fetchone()[0] >= 1)
+    finally:
         conn.close()
-    except Exception as e:
-        check("DB checks", False, str(e))
-
+    check("customer_segmenter.py exists", os.path.isfile(os.path.join(agent_workspace, "customer_segmenter.py")))
     return FAIL_COUNT == 0, f"Passed {PASS_COUNT}/{PASS_COUNT + FAIL_COUNT} checks"
 
 def main():

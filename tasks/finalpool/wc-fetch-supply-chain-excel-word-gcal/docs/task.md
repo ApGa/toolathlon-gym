@@ -9,3 +9,5 @@ Create an Excel file called Supply_Chain_Optimization.xlsx with four sheets. The
 Create a Word document called Supply_Chain_Report.docx with heading "Supply Chain Optimization Report", sections for "Inventory Health Assessment", "Supplier Performance Review", "Reorder Recommendations", and "Risk Mitigation Plan".
 
 Schedule a calendar event "Supply Chain Review Meeting" on March 19, 2026 from 9:00 AM to 10:30 AM UTC with description listing critical stockout risks.
+
+Use the full published product inventory and the actual supplier directory. State your demand-estimation window, supplier assignments, reorder policy, and delivery-date assumptions in the report; these choices are not uniquely prescribed. Keep the stated reorder-point formula and all summaries consistent with your inputs. Products_Supplied should count your assigned inventory products once across suppliers. For zero estimated daily demand, use N/A for days until stockout, place these rows last, and omit them from the average.

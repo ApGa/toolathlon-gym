@@ -18,9 +18,15 @@ import argparse
 import json
 import sys
 
-from .check_local import check_local  # uses iter_rows, str_match, lower() for content validation
-from .check_gsheet import check_gsheet
-from .check_email import check_email
+if __package__:
+    from .check_local import check_local
+    from .check_gsheet import check_gsheet
+    from .check_email import check_email
+else:
+    # The environment executes main.py directly; retain module execution too.
+    from check_local import check_local
+    from check_gsheet import check_gsheet
+    from check_email import check_email
 
 
 def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_file):

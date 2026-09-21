@@ -13,6 +13,7 @@ import os
 import sys
 
 import psycopg2
+from grader_helpers import rich_text
 
 try:
     from docx import Document
@@ -135,19 +136,7 @@ def check_notion():
 
         found_db = None
         for db_id, title_raw, props in dbs:
-            if isinstance(title_raw, list):
-                title = " ".join(t.get("plain_text", "") for t in title_raw if isinstance(t, dict))
-            elif isinstance(title_raw, str):
-                try:
-                    parsed = json.loads(title_raw)
-                    if isinstance(parsed, list):
-                        title = " ".join(t.get("plain_text", "") for t in parsed if isinstance(t, dict))
-                    else:
-                        title = title_raw
-                except (json.JSONDecodeError, TypeError):
-                    title = title_raw
-            else:
-                title = str(title_raw) if title_raw else ""
+            title = rich_text(title_raw)
 
             title_lower = title.lower()
             if ("compliance" in title_lower or "course" in title_lower) and (

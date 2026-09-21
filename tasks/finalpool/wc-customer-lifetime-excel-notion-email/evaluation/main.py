@@ -14,6 +14,7 @@ import sys
 
 import openpyxl
 import psycopg2
+from grader_helpers import rich_text
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
@@ -295,11 +296,7 @@ def check_notion():
 
     crm_db_id = None
     for db_id, title, props in databases:
-        title_str = ""
-        if isinstance(title, list):
-            title_str = " ".join(t.get("plain_text", "") for t in title if isinstance(t, dict))
-        elif isinstance(title, str):
-            title_str = title
+        title_str = rich_text(title)
         if "customer" in title_str.lower() and "crm" in title_str.lower():
             crm_db_id = db_id
             break

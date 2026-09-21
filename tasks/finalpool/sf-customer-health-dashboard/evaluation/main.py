@@ -10,7 +10,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import date
+from datetime import date, datetime
 
 import openpyxl
 import psycopg2
@@ -52,7 +52,8 @@ def str_match(a, b):
     return str(a).strip().lower() == str(b).strip().lower()
 
 
-def compute_expected_values():
+def compute_expected_values(launch_time):
+    analysis_date = datetime.fromisoformat(launch_time).date()
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
@@ -66,10 +67,10 @@ def compute_expected_values():
         ),
         health AS (
             SELECT c."CUSTOMER_ID", c."CUSTOMER_NAME", c."SEGMENT", c."REGION",
-                ROUND(GREATEST(0, 100 - (CURRENT_DATE - COALESCE(os.last_order_date, c."SIGNUP_DATE")))::numeric, 2) as recency_score,
+                ROUND(GREATEST(0, 100 - (%s::date - COALESCE(os.last_order_date, c."SIGNUP_DATE")))::numeric, 2) as recency_score,
                 ROUND(LEAST(100, COALESCE(os.order_count, 0) * 10)::numeric, 2) as frequency_score,
                 ROUND(LEAST(100, c."LIFETIME_VALUE" / 50.0)::numeric, 2) as monetary_score,
-                ROUND((0.4 * GREATEST(0, 100 - (CURRENT_DATE - COALESCE(os.last_order_date, c."SIGNUP_DATE"))) +
+                ROUND((0.4 * GREATEST(0, 100 - (%s::date - COALESCE(os.last_order_date, c."SIGNUP_DATE"))) +
                 0.3 * LEAST(100, COALESCE(os.order_count, 0) * 10) +
                 0.3 * LEAST(100, c."LIFETIME_VALUE" / 50.0))::numeric, 2) as health_score
             FROM sf_data."SALES_DW__PUBLIC__CUSTOMERS" c
@@ -82,7 +83,7 @@ def compute_expected_values():
                  ELSE 'Critical' END as status
         FROM health
         ORDER BY health_score ASC
-    """)
+    """, (analysis_date, analysis_date))
     all_rows = cur.fetchall()
 
     # Summary by segment
@@ -261,14 +262,14 @@ def check_calendar(expected):
           len(events) >= below_15_count,
           f"Expected >= {below_15_count}, got {len(events)}")
 
-    # Check first few events match lowest-score customers
-    if len(events) >= 3 and len(expected["below_15"]) >= 3:
-        for i in range(min(3, len(events))):
-            evt_summary = events[i][0] or ""
-            exp_name = expected["below_15"][i][0]
-            check(f"Event {i+1} mentions customer",
-                  exp_name.lower() in evt_summary.lower(),
-                  f"Expected '{exp_name}' in '{evt_summary}'")
+    # Equal scores have no mandated tie ordering. Compare coverage and scores,
+    # not the arbitrary row order returned by PostgreSQL for tied customers.
+    expected_scores = {r[0].strip().casefold(): float(r[6]) for r in expected["below_15"]}
+    event_names = [(event[0] or "").partition(":")[2].strip().casefold() for event in events]
+    check("Follow-up events cover the critical customers",
+          set(expected_scores).issubset(event_names))
+    scheduled_scores = [expected_scores[name] for name in event_names if name in expected_scores]
+    check("Follow-up events ordered by health score", scheduled_scores == sorted(scheduled_scores))
 
     # Check events start from 2026-03-09
     if events:
@@ -293,7 +294,7 @@ def main():
 
     print("=== Computing Expected Values ===")
     try:
-        expected = compute_expected_values()
+        expected = compute_expected_values(args.launch_time or "2026-03-08 00:00:00")
         print(f"  Total customers: {expected['total_customers']}")
         print(f"  Critical: {expected['critical_count']}")
         print(f"  Customers with score < 15: {len(expected['below_15'])}")

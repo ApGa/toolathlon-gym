@@ -29,6 +29,15 @@ def load_sheet_rows(wb, sheet_name):
     return None
 
 
+def highest_department_names(workbook):
+    """Derive the summary from the validated detail table, accepting rounded ties."""
+    rows = load_sheet_rows(workbook, 'Satisfaction Analysis')[1:]
+    values = [(str(row[0]).strip().casefold(), float(row[1]))
+              for row in rows if row and row[0] is not None]
+    highest = max(value for _, value in values)
+    return {name for name, value in values if value == highest}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
@@ -133,6 +142,12 @@ def main():
                 errors.append(f"Missing row: {g_row[0]}")
                 continue
             
+            if key == 'happiest_dept':
+                expected = highest_department_names(gt_wb)
+                if len(a_row) < 2 or str(a_row[1]).strip().casefold() not in expected:
+                    errors.append(f"{key}: expected one of {sorted(expected)}, got {a_row}")
+                continue
+
             if len(a_row) > 1 and len(g_row) > 1:
                 if not num_close(a_row[1], g_row[1], 0.5):
                     errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=0.5)")

@@ -17,6 +17,8 @@ from argparse import ArgumentParser
 
 import psycopg2
 import openpyxl
+from collections import defaultdict
+from grader_helpers import records, close, text
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
@@ -105,43 +107,56 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         record("Engagement_Analysis sheet has >= 3 rows", len(data_rows2) >= 3,
                f"Found {len(data_rows2)} data rows")
 
-    # --- Groundtruth XLSX value comparison ---
-    gt_path = os.path.join(groundtruth_workspace, "Community_Report.xlsx")
-    if os.path.isfile(gt_path):
-        import openpyxl as opx
-        gt_wb = opx.load_workbook(gt_path, data_only=True)
-        try:
-            a_wb = opx.load_workbook(os.path.join(agent_workspace, "Community_Report.xlsx"), data_only=True)
-        except Exception:
-            a_wb = None
-        if a_wb:
-            for gt_sname in gt_wb.sheetnames:
-                gt_ws = gt_wb[gt_sname]
-                a_ws = None
-                for asn in a_wb.sheetnames:
-                    if asn.strip().lower() == gt_sname.strip().lower():
-                        a_ws = a_wb[asn]; break
-                if a_ws is None:
-                    record(f"GT sheet '{gt_sname}' exists in agent xlsx", False, f"Available: {a_wb.sheetnames}")
-                    continue
-                gt_rows = [r for r in gt_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-                a_rows = [r for r in a_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-                record(f"GT '{gt_sname}' row count", len(a_rows) == len(gt_rows),
-                       f"Expected {len(gt_rows)}, got {len(a_rows)}")
-                for ri in range(min(3, len(gt_rows))):
-                    if ri >= len(a_rows): break
-                    ok = True
-                    for ci in range(min(len(gt_rows[ri]), len(a_rows[ri]))):
-                        gv, av = gt_rows[ri][ci], a_rows[ri][ci]
-                        if gv is None: continue
-                        if isinstance(gv, (int, float)):
-                            if not num_close(av, gv, max(abs(gv)*0.1, 1.0)): ok = False; break
-                        else:
-                            if not str_match(av, gv): ok = False; break
-                    record(f"GT '{gt_sname}' row {ri+1} values", ok,
-                           f"gt={gt_rows[ri][:4]}, agent={a_rows[ri][:4] if ri < len(a_rows) else 'missing'}")
-            a_wb.close()
-        gt_wb.close()
+    check_seeded_video_data(wb)
+    wb.close()
+
+
+def check_seeded_video_data(wb):
+    videos = records(wb, "Top_Videos", ("rank", "video_id", "title", "views", "likes", "duration_sec", "topic_tags", "engagement_rate"), record)
+    topics = records(wb, "Engagement_Analysis", ("topic", "avg_engagement_rate", "total_views", "video_count"), record)
+    conn = psycopg2.connect(**DB_CONFIG)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT video_id, title, view_count, like_count, duration FROM youtube.videos WHERE channel_title = 'Fireship' ORDER BY view_count DESC, video_id")
+            available = cur.fetchall()
+    finally:
+        conn.close()
+    by_id = {v[0]: v for v in available}
+    # The prompt asks for broad topic coverage; the primary topic is chosen by
+    # the agent, so check its selected eight real videos and derived aggregates.
+    ids = [str(v["video_id"]) for v in videos]
+    record("Eight distinct Fireship videos", len(ids) == 8 and len(set(ids)) == 8
+           and all(v in by_id for v in ids))
+    aggregates = defaultdict(lambda: [0, 0, 0.0])
+    previous = float("inf")
+    for rank, row in enumerate(videos, 1):
+        reference = by_id.get(str(row["video_id"]))
+        if reference is None:
+            continue
+        vid, title, views, likes, duration = reference
+        rate = 100 * likes / views if views else 0
+        correct = text(row["title"]) == text(title) and close(row["rank"], rank, 0)
+        correct &= close(row["views"], views, 0) and close(row["likes"], likes, 0)
+        correct &= close(row["duration_sec"], duration, 1) and close(row["engagement_rate"], rate, .02)
+        correct &= views <= previous
+        record(f"Seeded values and rank for {vid}", correct)
+        previous = views
+        topic = text(row["topic_tags"])
+        record(f"Topic for {vid}", bool(topic))
+        values = aggregates[topic]
+        values[0] += 1
+        values[1] += views
+        values[2] += rate
+    names = [text(row["topic"]) for row in topics]
+    record("Analysis covers each selected topic once", len(names) >= 4
+           and len(names) == len(set(names)) and set(names) == set(aggregates))
+    for row, topic in zip(topics, names):
+        if topic not in aggregates:
+            continue
+        count, views, rates = aggregates[topic]
+        record(f"Topic {topic} aggregates", close(row["video_count"], count, 0)
+               and close(row["total_views"], views, 0)
+               and close(row["avg_engagement_rate"], rates / count, .02))
 
 
 def check_gform():

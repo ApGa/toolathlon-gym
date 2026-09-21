@@ -2,6 +2,8 @@
 import os
 import argparse, json, os, sys
 import openpyxl
+from pathlib import Path
+from grader_helpers import records, close, text, fixture_table
 
 
 DB_CONFIG = {
@@ -35,6 +37,38 @@ def get_conn():
     import psycopg2
     return psycopg2.connect(**DB_CONFIG)
 
+def check_benchmark_data(wb):
+    benchmark = fixture_table(Path(__file__).resolve().parents[1])
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Match the store's embedded category names, as exposed by product
+            # tools, instead of an unrelated sales-region example workbook.
+            cur.execute("""
+                SELECT category->>'name', COUNT(*), AVG(p.price)
+                FROM wc.products p CROSS JOIN LATERAL jsonb_array_elements(p.categories) category
+                GROUP BY category->>'name'
+            """)
+            products = {name: (count, float(avg)) for name, count, avg in cur.fetchall()}
+    finally:
+        conn.close()
+    rows = records(wb, "Data_Analysis", ("category", "product_count", "our_avg_price", "market_avg_price", "price_gap_pct"), check)
+    lookup = {text(r["category"]): r for r in rows}
+    check("One row for every benchmark category", len(rows) == len(benchmark)
+          and set(lookup) == {text(r["Product_Category"]) for r in benchmark})
+    for reference in benchmark:
+        category = reference["Product_Category"]
+        count, average = products.get(category, (0, 0))
+        market = float(reference["Market_Avg_Price"])
+        row = lookup.get(text(category), {})
+        check(f"{category} comparison values", count > 0 and close(row.get("product_count"), count, 0)
+              and close(row.get("our_avg_price"), average, .02)
+              and close(row.get("market_avg_price"), market, .02)
+              and close(row.get("price_gap_pct"), (average / market - 1) * 100, .02))
+    dimensions = [text(r["category"]) for r in rows]
+    check("Categories sorted alphabetically", dimensions == sorted(dimensions))
+
+
 def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_file):
     global PASS_COUNT, FAIL_COUNT
     PASS_COUNT = 0
@@ -48,17 +82,7 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         gt_path = os.path.join(groundtruth_workspace, "Wc_Reconciliation_Report.xlsx")
         gt_wb = openpyxl.load_workbook(gt_path) if os.path.exists(gt_path) else None
 
-        check("Data_Analysis sheet exists", "Data_Analysis" in wb.sheetnames)
-        if "Data_Analysis" in wb.sheetnames:
-            ws = wb["Data_Analysis"]
-            data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-            check("Data_Analysis has >= 5 rows", len(data_rows) >= 5, f"got {len(data_rows)}")
-
-            # Check headers
-            headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-            for expected_col in ['Region', 'Order_Count', 'Revenue', 'Market_Size_M', 'Market_Penetration_Pct']:
-                check(f"Data_Analysis has {expected_col} column",
-                      expected_col.lower() in headers, f"headers: {headers[:8]}")
+        check_benchmark_data(wb)
 
         check("Metrics sheet exists", "Metrics" in wb.sheetnames)
         if "Metrics" in wb.sheetnames:
@@ -80,7 +104,7 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
 
             # Check headers
             headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-            for expected_col in ['Priority', 'Action', 'Region']:
+            for expected_col in ['Priority', 'Action', 'Category']:
                 check(f"Recommendations has {expected_col} column",
                       expected_col.lower() in headers, f"headers: {headers[:8]}")
 

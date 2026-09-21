@@ -1,10 +1,7 @@
 """Evaluation script for yf-portfolio-gsheet-pdf-gcal-email."""
 import os
 import argparse, json, os, sys
-import openpyxl
-
-def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
-    return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
+from grader_helpers import google_sheet_records, close, number, text
 
 
 DB_CONFIG = {
@@ -26,75 +23,49 @@ def check(name, condition, detail=""):
         detail_str = str(detail)[:200] if detail else ""
         print(f"  [FAIL] {name}: {detail_str}")
 
-def safe_float(val, default=None):
-    try:
-        if val is None: return default
-        return float(str(val).replace(",", "").replace("%", "").replace("$", "").strip())
-    except (ValueError, TypeError):
-        return default
 
 def get_conn():
     import psycopg2
     return psycopg2.connect(**DB_CONFIG)
 
+def check_submitted_sheet(cur):
+    sheets = {}
+    for name, columns in [
+        ("Holdings", ("symbol", "company", "sector", "current_price", "shares_held", "market_value", "allocation_pct")),
+        ("Performance", ("symbol", "purchase_price", "current_price", "return_pct", "status")),
+        ("Rebalancing", ("symbol", "current_allocation", "target_allocation", "drift_pct", "action")),
+    ]:
+        rows = google_sheet_records(cur, "Portfolio Monitor Dashboard", name, columns, check)
+        symbols = {str(r["symbol"]).upper() for r in rows}
+        check(f"{name} covers the five tracked stocks", len(rows) == 5 and symbols == {"GOOGL", "AMZN", "JPM", "JNJ", "XOM"})
+        sheets[name] = rows
+    cur.execute("SELECT symbol, data FROM yf.stock_info WHERE symbol IN ('GOOGL', 'AMZN', 'JPM', 'JNJ', 'XOM')")
+    prices = {}
+    for symbol, data in cur.fetchall():
+        data = json.loads(data) if isinstance(data, str) else data
+        prices[symbol] = data.get("currentPrice")
+    for row in sheets["Holdings"]:
+        symbol = str(row["symbol"]).upper()
+        shares, value = number(row["shares_held"]), number(row["market_value"])
+        price = number(prices.get(symbol))
+        check(f"Current holding values for {symbol}", price is not None and close(row["current_price"], price, .02)
+              and shares is not None and shares > 0 and value is not None
+              and close(value, shares * price, max(2, .006 * price)))
+    for row in sheets["Performance"]:
+        purchase, current = number(row["purchase_price"]), number(row["current_price"])
+        check(f"Return calculation for {row['symbol']}", purchase is not None and purchase > 0
+              and current is not None and close(row["return_pct"], (current / purchase - 1) * 100, .03))
+    for row in sheets["Rebalancing"]:
+        current, target = number(row["current_allocation"]), number(row["target_allocation"])
+        check(f"Allocation drift for {row['symbol']}", current is not None and target is not None
+              and close(row["drift_pct"], current - target, .15)
+              and text(row["action"]) in {"buy", "sell", "hold"})
+
+
 def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_file):
     global PASS_COUNT, FAIL_COUNT
     PASS_COUNT = 0
     FAIL_COUNT = 0
-
-    # Check Portfolio_Dashboard_Reference.xlsx
-    excel_path = os.path.join(agent_workspace, "Portfolio_Dashboard_Reference.xlsx")
-    check("Portfolio_Dashboard_Reference.xlsx exists", os.path.exists(excel_path))
-    if os.path.exists(excel_path):
-        wb = openpyxl.load_workbook(excel_path)
-        gt_path = os.path.join(groundtruth_workspace, "Portfolio_Dashboard_Reference.xlsx")
-        gt_wb = openpyxl.load_workbook(gt_path) if os.path.exists(gt_path) else None
-
-        if gt_wb:
-            for sheet_name in gt_wb.sheetnames:
-                check(f"{sheet_name} sheet exists", sheet_name in wb.sheetnames)
-                if sheet_name in wb.sheetnames:
-                    ws = wb[sheet_name]
-                    gt_ws = gt_wb[sheet_name]
-                    # Check headers
-                    gt_headers = [str(c.value).strip().lower() if c.value else "" for c in gt_ws[1]]
-                    headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-                    for h in gt_headers:
-                        if h:
-                            check(f"{sheet_name} has {h} column", h in headers, f"headers: {headers[:10]}")
-                    # Check row count
-                    gt_rows = list(gt_ws.iter_rows(min_row=2, values_only=True))
-                    data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-                    min_rows = max(1, len(gt_rows) - 2)
-                    check(f"{sheet_name} has >= {min_rows} data rows", len(data_rows) >= min_rows, f"got {len(data_rows)}")
-
-                    # Cell value comparison against groundtruth
-                    header_map = {h: i for i, h in enumerate(headers)}
-                    gt_header_map = {h: i for i, h in enumerate(gt_headers)}
-                    for ri in range(min(3, len(gt_rows), len(data_rows))):
-                        gt_row = gt_rows[ri]
-                        agent_row = data_rows[ri]
-                        for ci, gt_h in enumerate(gt_headers):
-                            if not gt_h or ci >= len(gt_row):
-                                continue
-                            gv = gt_row[ci]
-                            agent_ci = header_map.get(gt_h)
-                            if agent_ci is None or agent_ci >= len(agent_row):
-                                continue
-                            av = agent_row[agent_ci]
-                            gf = safe_float(gv)
-                            af = safe_float(av)
-                            if gf is not None and af is not None:
-                                tol = max(0.5, abs(gf) * 0.15)
-                                check(f"{sheet_name} R{ri+2} {gt_h} ~{gf:.1f}",
-                                      abs(gf - af) <= tol, f"got {af}")
-                            elif gv is not None and av is not None:
-                                gs = str(gv).strip().lower()
-                                avs = str(av).strip().lower()
-                                if gs:
-                                    check(f"{sheet_name} R{ri+2} {gt_h} text",
-                                          gs == avs or gs in avs or avs in gs,
-                                          f"expected {gs[:50]}, got {avs[:50]}")
 
     # Check Python script exists (terminal usage)
     py_files = [f for f in os.listdir(agent_workspace) if f.endswith(".py")]
@@ -104,6 +75,7 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
     try:
         conn = get_conn()
         cur = conn.cursor()
+        check_submitted_sheet(cur)
         cur.execute("SELECT subject, to_addr FROM email.messages WHERE folder_id = (SELECT id FROM email.folders WHERE name = 'Sent' LIMIT 1) AND subject ILIKE '%portfolio%'")
         email_row = cur.fetchone()
         check("Email with correct subject sent", email_row is not None, "no matching email found")

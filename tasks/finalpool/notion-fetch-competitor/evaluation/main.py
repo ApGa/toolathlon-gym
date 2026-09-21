@@ -14,6 +14,7 @@ import sys
 
 import openpyxl
 import psycopg2
+from grader_helpers import rich_text
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
@@ -222,7 +223,7 @@ def check_notion():
                 if title_parts:
                     break
 
-        page_title = "".join(p.get("plain_text", "") for p in title_parts)
+        page_title = rich_text(title_parts)
 
         if "competitor" in page_title.lower():
             found_page = True
@@ -277,7 +278,7 @@ def check_notion():
                 title_parts = prop.get("title", [])
                 if title_parts:
                     break
-        page_title = "".join(p.get("plain_text", "") for p in title_parts)
+        page_title = rich_text(title_parts)
         if "competitor" not in page_title.lower():
             non_competitor_pages.append(page_title)
     if non_competitor_pages:

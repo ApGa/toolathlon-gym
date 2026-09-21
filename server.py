@@ -518,6 +518,11 @@ class MCPBridge:
             # (which hardcode `PG_DATABASE: "toolathlon"`) get rewired to the
             # per-session DB.
             full_env = {**os.environ, **env_vars, **self.pg_env}
+            if name == "terminal":
+                # uv activates the MCP server's minimal venv. Agent commands
+                # need the task interpreter/dependencies used by python_execute.
+                full_env["TOOLATHLON_TASK_PATH"] = full_env.get("PATH", os.defpath)
+                full_env["TOOLATHLON_TASK_VIRTUAL_ENV"] = full_env.get("VIRTUAL_ENV", "")
             os.makedirs(cwd, exist_ok=True)
 
             try:
@@ -1069,12 +1074,19 @@ class ToolathlonGym(Environment):
     @tool
     async def python_execute(self, params: PythonExecuteInput) -> ToolOutput:
         """Execute Python code in the workspace and return stdout/stderr."""
-        code_file = self.workspace_dir / f"_exec_{uuid4().hex[:8]}.py"
-        code_file.write_text(self._fixture_urls(params.code))
+        # Workspace listings must contain only task artifacts. A source file
+        # written there appears in its own os.listdir() output, then vanishes
+        # before the next call, sending agents after nonexistent artifacts.
+        scratch = tempfile.TemporaryDirectory(prefix="toolathlon-python-", dir=self.workspace_dir.parent)
+        code_file = Path(scratch.name) / "exec.py"
 
         try:
+            code_file.write_text(self._fixture_urls(params.code), encoding="utf-8")
             proc = await run_task_process(
-                "python3", str(code_file),
+                "python3", "-c",
+                "import runpy, sys; script = sys.argv.pop(1); "
+                "sys.path[0] = sys.argv.pop(1); runpy.run_path(script, run_name='__main__')",
+                str(code_file), str(self.workspace_dir),
                 cwd=str(self.workspace_dir),
                 env={**os.environ, **self._pg_env()},
                 timeout=60,
@@ -1105,7 +1117,7 @@ class ToolathlonGym(Environment):
                 kind="execution_error",
             )
         finally:
-            code_file.unlink(missing_ok=True)
+            scratch.cleanup()
 
     async def teardown(self):
         failures = []
