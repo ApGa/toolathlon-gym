@@ -21,9 +21,13 @@ class TerminalEnvironmentTest(unittest.IsolatedAsyncioTestCase):
     async def test_bridge_captures_task_environment_before_mcp_activation(self):
         with TemporaryDirectory() as tmp:
             process = SimpleNamespace(returncode=None)
-            mcp_process = SimpleNamespace(initialize=AsyncMock(return_value=True), close=AsyncMock())
+            tools = [{"name": "run_command", "inputSchema": {}}]
+            mcp_process = SimpleNamespace(
+                initialize=AsyncMock(return_value=True), list_tools=AsyncMock(return_value=tools), close=AsyncMock(),
+            )
             with (
                 patch("server.CONFIGS_DIR", ROOT / "configs/mcp_servers"),
+                patch("server.ALL_TOOL_SCHEMAS", {"terminal": tools}),
                 patch.dict(os.environ, {"PATH": "/task/venv/bin:/usr/bin", "VIRTUAL_ENV": "/task/venv"}),
                 patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=process) as spawn,
                 patch("server._MCPProcess", return_value=mcp_process),
