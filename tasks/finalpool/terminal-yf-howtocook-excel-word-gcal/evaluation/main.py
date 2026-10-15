@@ -331,6 +331,18 @@ def check_reverse_validation():
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
 
+        # Without wellness events there is nothing to validate.
+        cur.execute("""
+            SELECT COUNT(*) FROM gcal.events
+            WHERE lower(summary) LIKE '%%wellness%%'
+               OR lower(summary) LIKE '%%breakfast%%'
+               OR lower(summary) LIKE '%%lunch%%'
+               OR lower(summary) LIKE '%%dinner%%'
+               OR lower(summary) LIKE '%%meal prep%%'
+        """)
+        has_events = cur.fetchone()[0] > 0
+        none_detail = "No wellness events"
+
         # Check no duplicate calendar events (same summary on same date)
         cur.execute("""
             SELECT summary, start_datetime::date, COUNT(*)
@@ -344,8 +356,8 @@ def check_reverse_validation():
             HAVING COUNT(*) > 1
         """)
         dupes = cur.fetchall()
-        check("No duplicate wellness calendar events", len(dupes) == 0,
-              f"Found {len(dupes)} duplicates: {dupes}")
+        check("No duplicate wellness calendar events", has_events and len(dupes) == 0,
+              f"Found {len(dupes)} duplicates: {dupes}" if has_events else none_detail)
 
         # Check no wellness events on weekends
         cur.execute("""
@@ -359,8 +371,8 @@ def check_reverse_validation():
               AND EXTRACT(DOW FROM start_datetime) IN (0, 6)
         """)
         weekend_events = cur.fetchall()
-        check("No wellness events on weekends", len(weekend_events) == 0,
-              f"Found {len(weekend_events)} weekend events: {weekend_events}")
+        check("No wellness events on weekends", has_events and len(weekend_events) == 0,
+              f"Found {len(weekend_events)} weekend events: {weekend_events}" if has_events else none_detail)
 
         # Check events are within the expected date range
         cur.execute("""
@@ -375,8 +387,8 @@ def check_reverse_validation():
         """)
         out_of_range = cur.fetchall()
         check("No wellness events outside March 16 - April 10 range",
-              len(out_of_range) == 0,
-              f"Found {len(out_of_range)} out-of-range events: {out_of_range}")
+              has_events and len(out_of_range) == 0,
+              f"Found {len(out_of_range)} out-of-range events: {out_of_range}" if has_events else none_detail)
 
         cur.close()
         conn.close()

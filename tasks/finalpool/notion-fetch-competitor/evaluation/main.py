@@ -286,7 +286,8 @@ def check_notion():
                f"Found {len(non_competitor_pages)} extra page(s): {non_competitor_pages[:3]}")
         all_ok = False
     else:
-        record("No unexpected Notion pages", True)
+        # Without the analysis page there is nothing to validate.
+        record("No unexpected Notion pages", found_page, "No competitor page was created")
 
     return all_ok
 

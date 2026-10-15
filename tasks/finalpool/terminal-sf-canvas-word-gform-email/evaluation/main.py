@@ -312,7 +312,9 @@ def check_reverse_validation():
                 cur.close()
                 conn.close()
                 return
-    check("No emails sent to noise recipients", True)
+    # Without sent mail there is nothing to validate.
+    check("No emails sent to noise recipients", bool(sent),
+          "No e-mail was sent from training_analytics@company.com")
 
     cur.close()
     conn.close()

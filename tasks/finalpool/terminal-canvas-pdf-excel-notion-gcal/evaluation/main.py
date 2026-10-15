@@ -337,7 +337,7 @@ def check_reverse_validation():
                   no_noise,
                   f"Page titles in accreditation DB: {page_titles}")
         else:
-            check("No noise Notion pages in accreditation tracker", True,
+            check("No noise Notion pages in accreditation tracker", False,
                   "No accreditation DB found to check")
 
         # Check noise 'Project Milestones' database pages are not mixed in

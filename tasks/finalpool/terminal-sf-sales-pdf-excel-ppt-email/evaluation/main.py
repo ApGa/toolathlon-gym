@@ -290,8 +290,15 @@ def check_reverse_validation(workspace):
               AND to_addr::text ILIKE '%%competitor%%'
         """)
         bad_count = cur.fetchone()[0]
-        check("No sales emails to competitor addresses", bad_count == 0,
-              f"Found {bad_count}")
+        # Without the sales review e-mail there is nothing to validate.
+        cur.execute("""
+            SELECT COUNT(*) FROM email.messages
+            WHERE folder_id IN (SELECT id FROM email.folders WHERE LOWER(name) LIKE '%%sent%%')
+              AND (lower(subject) LIKE '%%sales%%territory%%review%%' OR lower(subject) LIKE '%%q1%%sales%%')
+        """)
+        sent = cur.fetchone()[0]
+        check("No sales emails to competitor addresses", sent > 0 and bad_count == 0,
+              f"Found {bad_count}" if sent else "No sales review e-mail was sent")
         cur.close()
         conn.close()
     except Exception:

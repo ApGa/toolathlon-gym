@@ -410,12 +410,15 @@ def check_emails():
         else:
             all_passed = False
 
-    # Check suppliers that should NOT receive emails
+    # Check suppliers that should NOT receive emails. Without any restock
+    # request there is nothing to validate.
+    sent_any = any(find_email_for_recipient(addr) for addr in expected_suppliers)
     for email_addr in should_not_receive:
         result = find_email_for_recipient(email_addr)
         check(f"No email sent to {email_addr} (no out-of-stock products)",
-              result is None,
-              f"Unexpected email found with subject: {result[0][:100] if result else ''}")
+              sent_any and result is None,
+              f"Unexpected email found with subject: {result[0][:100] if result else ''}"
+              if sent_any else "No restock request was sent")
         if result:
             all_passed = False
 

@@ -187,8 +187,14 @@ def check_reverse_validation(workspace):
             GROUP BY subject HAVING COUNT(*) > 1
         """)
         dupes = cur.fetchall()
-        check("No duplicate research emails", len(dupes) == 0,
-              f"Duplicates: {dupes}")
+        # Without a research e-mail there is nothing to validate.
+        cur.execute("""
+            SELECT COUNT(*) FROM email.messages
+            WHERE lower(subject) LIKE '%%fintech%%' OR lower(subject) LIKE '%%market efficiency%%'
+        """)
+        email_count = cur.fetchone()[0]
+        check("No duplicate research emails", email_count > 0 and len(dupes) == 0,
+              f"Duplicates: {dupes}" if email_count else "No research e-mail was sent")
         cur.close()
         conn.close()
     except Exception:

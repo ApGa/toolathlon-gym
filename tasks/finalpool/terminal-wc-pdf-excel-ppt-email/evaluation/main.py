@@ -345,8 +345,15 @@ def check_reverse_validation():
             all_to.append(to_str)
         combined_to = " ".join(all_to)
         no_noise = not any(na.lower() in combined_to for na in noise_recipients)
+        # Without a sent recall e-mail there is nothing to validate.
+        cur.execute(f"""
+            SELECT COUNT(*) FROM email.messages
+            WHERE {SENT_FOLDER} AND (subject ILIKE '%%recall%%' OR subject ILIKE '%%impact%%')
+        """)
+        sent = cur.fetchone()[0]
         check("No recall emails to noise recipients (team@, all@, accounts@, hr@)",
-              no_noise, f"Recipients found: {combined_to[:200]}")
+              sent > 0 and no_noise,
+              f"Recipients found: {combined_to[:200]}" if sent else "No recall e-mail was sent")
 
     except Exception as e:
         check("Reverse validation (email noise)", False, str(e))

@@ -232,8 +232,14 @@ def check_reverse_validation(workspace):
               AND start_datetime < '2026-03-01'
         """)
         old_events = cur.fetchone()[0]
-        check("No restock events before March 2026", old_events == 0,
-              f"Found {old_events} old events")
+        # Without restock events there is nothing to validate.
+        cur.execute("""
+            SELECT COUNT(*) FROM gcal.events
+            WHERE summary ILIKE '%%restock%%' OR summary ILIKE '%%inventory%%'
+        """)
+        event_count = cur.fetchone()[0]
+        check("No restock events before March 2026", event_count > 0 and old_events == 0,
+              f"Found {old_events} old events" if event_count else "No restock events")
         cur.close()
         conn.close()
     except Exception:

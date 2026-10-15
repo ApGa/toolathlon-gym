@@ -245,7 +245,7 @@ def check_reverse_validation(workspace):
                   no_noise,
                   f"Found noise content in Research_Summary sheet")
         else:
-            check("No noise scholarly papers in Research_Summary", True, "No Research_Summary sheet to check")
+            check("No noise scholarly papers in Research_Summary", False, "No Research_Summary sheet to check")
 
         # Also check all sheets for noise paper content
         all_wb_text = ""
@@ -260,7 +260,7 @@ def check_reverse_validation(workspace):
               "Found noise paper content in workbook")
         wb.close()
     else:
-        check("No noise scholarly papers in Excel", True, "Excel file not found to check")
+        check("No noise scholarly papers in Excel", False, "Excel file not found to check")
 
 
 def main():

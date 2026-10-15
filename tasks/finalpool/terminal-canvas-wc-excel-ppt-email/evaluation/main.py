@@ -528,14 +528,22 @@ def check_reverse_validation(workspace):
             "alumni@university.edu",
             "admissions@university.edu",
         ]
+        # Without the report e-mails there is nothing to validate.
+        cur.execute("""
+            SELECT COUNT(*) FROM email.messages
+            WHERE folder_id IN (SELECT id FROM email.folders WHERE name = 'Sent')
+              AND (to_addr::text ILIKE '%%bookstore_manager@university.edu%%'
+                   OR to_addr::text ILIKE '%%academic_affairs@university.edu%%')
+        """)
+        sent = cur.fetchone()[0]
         for addr in noise_recipients:
             cur.execute(
                 "SELECT COUNT(*) FROM email.messages WHERE to_addr::text ILIKE %s",
                 (f"%{addr}%",),
             )
             cnt = cur.fetchone()[0]
-            check(f"No email sent to noise recipient {addr}", cnt == 0,
-                  f"Found {cnt} emails to {addr}")
+            check(f"No email sent to noise recipient {addr}", sent > 0 and cnt == 0,
+                  f"Found {cnt} emails to {addr}" if sent else "No report e-mail was sent")
 
         # Check Excel does not include non-Electronics categories in Purchase_Summary
         xlsx_path = os.path.join(workspace, "Student_Purchase_Analysis.xlsx")

@@ -381,8 +381,15 @@ def check_reverse_validation(workspace):
               AND to_addr::text NOT ILIKE '%%cs_leadership%%'
         """)
         wrong_emails = cur.fetchone()[0]
-        check("No audit emails to wrong recipients", wrong_emails == 0,
-              f"Found {wrong_emails} misrouted emails")
+        # Without the audit e-mail there is nothing to validate.
+        cur.execute("""
+            SELECT COUNT(*) FROM email.messages
+            WHERE folder_id IN (SELECT id FROM email.folders WHERE LOWER(name) LIKE '%%sent%%')
+              AND lower(subject) LIKE '%%support%%quality%%audit%%'
+        """)
+        sent = cur.fetchone()[0]
+        check("No audit emails to wrong recipients", sent > 0 and wrong_emails == 0,
+              f"Found {wrong_emails} misrouted emails" if sent else "No audit e-mail was sent")
         cur.close()
         conn.close()
     except Exception:

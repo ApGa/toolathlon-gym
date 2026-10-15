@@ -237,7 +237,8 @@ def check_reverse_validation(workspace):
             title_str = json.dumps(title).lower() if title else ""
             if "investment" in title_str and "research" in title_str:
                 invest_dbs.append(db_id)
-        check("No duplicate Investment Research databases", len(invest_dbs) <= 1,
+        # Exactly one: zero means the research log was never created.
+        check("No duplicate Investment Research databases", len(invest_dbs) == 1,
               f"Found {len(invest_dbs)} matching databases")
         cur.close()
         conn.close()
