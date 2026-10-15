@@ -49,26 +49,30 @@ def check_xlsx_content(workspace, groundtruth_workspace="."):
             rows = list(ws.iter_rows(values_only=True))
             record(f"xlsx '{ws.title}' has data", len(rows) >= 2, f"{len(rows)} rows")
     except Exception as e:
+        # Compare an unreadable workbook as one without sheets, so every groundtruth check below fails too:
+        # returning here left 4 checks, and 3 of them pass with any one-paragraph docx (the 70% threshold).
         record("xlsx readable", False, str(e))
-        return True
+        wb = None
+    agent_sheets = wb.sheetnames if wb is not None else []
 
     # --- Groundtruth value comparison ---
     gt_path = os.path.join(groundtruth_workspace, "paper_analysis.xlsx")
     if not os.path.isfile(gt_path):
         record("Groundtruth xlsx exists", False, gt_path)
-        wb.close()
+        if wb is not None:
+            wb.close()
         return True
 
     gt_wb = openpyxl.load_workbook(gt_path, data_only=True)
     for gt_sheet_name in gt_wb.sheetnames:
         gt_ws = gt_wb[gt_sheet_name]
         agent_ws = None
-        for asn in wb.sheetnames:
+        for asn in agent_sheets:
             if asn.strip().lower() == gt_sheet_name.strip().lower():
                 agent_ws = wb[asn]
                 break
         if agent_ws is None:
-            record(f"GT sheet '{gt_sheet_name}' exists in agent", False, f"Available: {wb.sheetnames}")
+            record(f"GT sheet '{gt_sheet_name}' exists in agent", False, f"Available: {agent_sheets}")
             continue
 
         gt_rows = [r for r in gt_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
@@ -104,6 +108,8 @@ def check_xlsx_content(workspace, groundtruth_workspace="."):
             else:
                 record(f"GT '{gt_sheet_name}' row {idx+1} exists", False, "Row missing in agent")
     gt_wb.close()
+    if wb is None:
+        return False
     wb.close()
     return True
 

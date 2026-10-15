@@ -7,11 +7,17 @@ that measured the file's size, printed PASS, counted a pass or returned success.
 This test reads every grader's source and fails on that shape, so a fallback
 has to record a failed check instead. Three graders took that path for any file
 python-docx or python-pptx could not open; their checks are exercised directly.
+Returning success after recording the failure is the same shape: a grader that
+gates on the return value credits the file, and one that passes at a share of
+its checks (70%) skips the content checks the file would have failed.
 """
 import ast
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
 import random
+import shutil
 import sys
 from tempfile import TemporaryDirectory
 import unittest
@@ -85,30 +91,49 @@ def _credits(body):
                 found.append(f"{target} += 1")
             if "fail" in target.lower():
                 records_failure = True
-    returns_success = False
+    if _returns_success(body):
+        found.append("returns success after recording a failure" if records_failure else "returns success")
+    return found
+
+
+def _returns_success(body):
     for node in ast.walk(ast.Module(body=body, type_ignores=[])):
         if isinstance(node, ast.Return) and node.value is not None:
             value = node.value.elts[0] if isinstance(node.value, ast.Tuple) and node.value.elts else node.value
             if isinstance(value, ast.Constant) and value.value is True:
-                returns_success = True
-    if returns_success and not records_failure:
-        found.append("returns success")
-    return found
+                return True
+    return False
 
 
 def weakening_handlers(source, filename="<grader>"):
-    """(line, what) for each handler around reading a deliverable that credits it instead of failing."""
-    hits = []
-    for node in ast.walk(ast.parse(source, filename=filename)):
-        if not isinstance(node, ast.Try) or not _opens_deliverable(node.body):
+    """(line, what) for each handler around reading a deliverable that credits it instead of failing.
+
+    Also `if <reader> is None:` blocks, where <reader> is what an ImportError handler set to None
+    (`try: from pptx import Presentation / except ImportError: Presentation = None`).
+    """
+    tree = ast.parse(source, filename=filename)
+    hits, readers = [], set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
             continue
         for handler in node.handlers:
-            if not _caught(handler) & CAUGHT:
+            if _caught(handler) & {"ImportError", "ModuleNotFoundError"}:
+                readers |= {target.id for stmt in handler.body if isinstance(stmt, ast.Assign)
+                            and isinstance(stmt.value, ast.Constant) and stmt.value.value is None
+                            for target in stmt.targets if isinstance(target, ast.Name)}
+            if not _opens_deliverable(node.body) or not _caught(handler) & CAUGHT:
                 continue
             found = _credits(handler.body)
             if found:
                 hits.append((handler.lineno, ", ".join(sorted(set(found)))))
-    return hits
+    for node in ast.walk(tree):
+        test = getattr(node, "test", None)
+        if isinstance(node, ast.If) and isinstance(test, ast.Compare) and isinstance(test.left, ast.Name) \
+                and test.left.id in readers and len(test.ops) == 1 and isinstance(test.ops[0], ast.Is):
+            found = _credits(node.body)
+            if found:
+                hits.append((node.lineno, ", ".join(sorted(set(found)))))
+    return sorted(hits)
 
 
 class GraderFallbackTest(unittest.TestCase):
@@ -158,8 +183,33 @@ class GraderFallbackTest(unittest.TestCase):
             "    except Exception:\n"
             "        return True, ''\n"
         )
+        old_xlsx = (
+            "def check_xlsx(path):\n"
+            "    try:\n"
+            "        wb = openpyxl.load_workbook(path)\n"
+            "    except Exception as e:\n"
+            "        record('xlsx readable', False, str(e))\n"
+            "        return True\n"
+        )
+        old_none = (
+            "try:\n"
+            "    from pptx import Presentation\n"
+            "except ImportError:\n"
+            "    Presentation = None\n"
+            "def check_pptx(path):\n"
+            "    if Presentation is None:\n"
+            "        record('python-pptx available', False, 'Cannot import pptx')\n"
+            "        return True  # File exists, can't verify content\n"
+        )
         fixed = (
+            "try:\n"
+            "    from docx import Document\n"
+            "except ImportError:\n"
+            "    Document = None\n"
             "def check_pdf(path):\n"
+            "    if Document is None:\n"
+            "        record('python-docx available', False, 'python-docx is not installed')\n"
+            "        return False\n"
             "    try:\n"
             "        text = pdf_text(path)\n"
             "    except PdfTextError as error:\n"
@@ -169,11 +219,13 @@ class GraderFallbackTest(unittest.TestCase):
             "        wb = openpyxl.load_workbook(path)\n"
             "    except Exception as e:\n"
             "        record('xlsx readable', False, str(e))\n"
-            "        return True\n"
+            "        wb = None\n"
         )
         self.assertEqual(weakening_handlers(old_pdf), [(5, "returns success")])
         self.assertEqual(weakening_handlers(old_docx), [(5, "getsize()")])
         self.assertEqual(weakening_handlers(old_pptx), [(5, "returns success")])
+        self.assertEqual(weakening_handlers(old_xlsx), [(4, "returns success after recording a failure")])
+        self.assertEqual(weakening_handlers(old_none), [(6, "returns success after recording a failure")])
         self.assertEqual(weakening_handlers(fixed), [])
 
 
@@ -227,6 +279,40 @@ class OfficeDeliverableTest(unittest.TestCase):
                 ok, detail = check(tmp)
                 self.assertFalse(ok)
                 self.assertIn("is not a readable", detail)
+
+
+class UnreadableWorkbookTest(unittest.TestCase):
+    """arxiv-research-workflow-pipeline passes at 70% of its checks. It returned on an unreadable workbook,
+    leaving 4 checks: workbook and docx exist, docx has a paragraph, workbook unreadable. So random bytes
+    named paper_analysis.xlsx and a one-paragraph docx scored 3/4 and passed."""
+
+    TASK = TASKS / "arxiv-research-workflow-pipeline"
+
+    def grade(self, workspace):
+        grader = load_grader("arxiv-research-workflow-pipeline")
+        argv = ["main.py", "--agent_workspace", str(workspace), "--groundtruth_workspace",
+                str(self.TASK / "groundtruth_workspace")]
+        out = io.StringIO()
+        with patch.object(sys, "argv", argv), contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as code:
+            grader.main()
+        return code.exception.code, out.getvalue()
+
+    def test_an_unreadable_workbook_fails_every_groundtruth_check(self):
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            document(workspace / "literature_review.docx", "A literature review.")
+            (workspace / "paper_analysis.xlsx").write_bytes(random.Random(7).randbytes(8192))
+            code, output = self.grade(workspace)
+        self.assertEqual(code, 1, output)
+        self.assertIn("[FAIL] xlsx readable", output)
+        self.assertIn("exists in agent", output)
+
+    def test_the_groundtruth_files_pass(self):
+        with TemporaryDirectory() as tmp:
+            for name in ("paper_analysis.xlsx", "literature_review.docx"):
+                shutil.copy(self.TASK / "groundtruth_workspace" / name, Path(tmp) / name)
+            code, output = self.grade(Path(tmp))
+        self.assertEqual(code, 0, output)
 
 
 if __name__ == "__main__":
