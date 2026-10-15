@@ -5,8 +5,8 @@ Injects 7 papers into scholarly.arxiv_papers and arxiv.papers:
   - 5 LLM reasoning papers
   - 2 noise papers (different topics)
 
-Also injects a Google Form with 3 questions, 4 Google Calendar reading sessions,
-and clears email tables.
+Clears the form, calendar and email tables. The reading-group form and the
+four reading sessions are the agent's deliverables, so they are not injected.
 
 Prerequisites:
   - PostgreSQL toolathlon_gym database running on localhost:5432
@@ -104,36 +104,6 @@ PAPERS = [
     },
 ]
 
-FORM_TITLE = "Reading Group Paper Selection"
-PAPER_TITLES = [p["title"] for p in PAPERS if p["topic"] == "LLM_Reasoning"]
-
-GCAL_EVENTS = [
-    {
-        "summary": "Reading Group Session 1",
-        "description": "Weekly LLM Reasoning reading group session. Paper: Chain-of-Thought Reasoning Survey.",
-        "start": "2026-04-07 14:00:00",
-        "end": "2026-04-07 15:30:00",
-    },
-    {
-        "summary": "Reading Group Session 2",
-        "description": "Weekly LLM Reasoning reading group session. Paper: Self-Consistency for Chain of Thought.",
-        "start": "2026-04-14 14:00:00",
-        "end": "2026-04-14 15:30:00",
-    },
-    {
-        "summary": "Reading Group Session 3",
-        "description": "Weekly LLM Reasoning reading group session. Paper: Tree of Thoughts.",
-        "start": "2026-04-21 14:00:00",
-        "end": "2026-04-21 15:30:00",
-    },
-    {
-        "summary": "Reading Group Session 4",
-        "description": "Weekly LLM Reasoning reading group session. Paper: Least-to-Most Prompting and ReAct.",
-        "start": "2026-04-28 14:00:00",
-        "end": "2026-04-28 15:30:00",
-    },
-]
-
 
 def clear_tables(conn):
     with conn.cursor() as cur:
@@ -199,64 +169,6 @@ def inject_arxiv_papers(conn):
     print(f"[preprocess] Injected {len(PAPERS)} papers into arxiv.papers")
 
 
-def inject_gform(conn):
-    with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO gform.forms (title, document_title, description)
-            VALUES (%s, %s, %s)
-            RETURNING id
-        """, (
-            FORM_TITLE,
-            FORM_TITLE,
-            "Help us prioritize which papers to read and understand your availability.",
-        ))
-        form_id = cur.fetchone()[0]
-
-        questions = [
-            {
-                "title": "Which paper should we read first?",
-                "question_type": "RADIO",
-                "required": True,
-                "config": {"options": PAPER_TITLES},
-                "position": 0,
-            },
-            {
-                "title": "What aspects interest you most?",
-                "question_type": "RADIO",
-                "required": False,
-                "config": {"options": ["Reasoning Methods", "Implementation", "Evaluation", "Theory"]},
-                "position": 1,
-            },
-            {
-                "title": "Availability for reading sessions",
-                "question_type": "CHECKBOX",
-                "required": False,
-                "config": {"options": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]},
-                "position": 2,
-            },
-        ]
-        for q in questions:
-            cur.execute("""
-                INSERT INTO gform.questions (form_id, title, question_type, required, config, position)
-                VALUES (%s, %s, %s, %s, %s::jsonb, %s)
-            """, (form_id, q["title"], q["question_type"], q["required"],
-                  json.dumps(q["config"]), q["position"]))
-
-    conn.commit()
-    print(f"[preprocess] Injected GForm '{FORM_TITLE}' with 3 questions")
-
-
-def inject_gcal_events(conn):
-    with conn.cursor() as cur:
-        for ev in GCAL_EVENTS:
-            cur.execute("""
-                INSERT INTO gcal.events (summary, description, start_datetime, end_datetime)
-                VALUES (%s, %s, %s, %s)
-            """, (ev["summary"], ev["description"], ev["start"], ev["end"]))
-    conn.commit()
-    print(f"[preprocess] Injected {len(GCAL_EVENTS)} GCal reading group events")
-
-
 def ensure_email_folder(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM email.folders WHERE name = 'INBOX' LIMIT 1")
@@ -277,8 +189,6 @@ def main():
         clear_tables(conn)
         inject_scholarly_papers(conn)
         inject_arxiv_papers(conn)
-        inject_gform(conn)
-        inject_gcal_events(conn)
         ensure_email_folder(conn)
     finally:
         conn.close()

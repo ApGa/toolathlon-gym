@@ -37,6 +37,29 @@ def record(name, passed, detail=""):
         print(f"  [FAIL] {name}{msg}")
 
 
+def fail_all(names, detail):
+    """A missing deliverable fails every check that depends on it."""
+    for name in names:
+        record(name, False, detail)
+
+
+GSHEET_CHECKS = [
+    "Weekly Meal Plan spreadsheet exists",
+    "Spreadsheet title contains 'meal' or 'weekly'",
+    "GSheet has at least 21 data rows",
+    "GSheet contains Breakfast, Lunch, Dinner meal types",
+]
+GCAL_CHECKS = [
+    "At least 7 dinner prep events Apr 7-13 2026",
+    "Events start at 18:00",
+    "Events on 7 distinct days",
+]
+EMAIL_CHECKS = [
+    "Email sent to meal_planning@service.com",
+    "Email mentions meal plan content",
+]
+
+
 def check_gsheet():
     print("\n=== Check 1: Google Sheet Weekly Meal Plan ===")
 
@@ -56,10 +79,10 @@ def check_gsheet():
         cur.execute("SELECT id, title FROM gsheet.spreadsheets ORDER BY created_at DESC LIMIT 1")
         spreadsheet = cur.fetchone()
 
-    record("Weekly Meal Plan spreadsheet exists", spreadsheet is not None,
-           "No spreadsheet found with 'meal plan' or 'weekly' in title")
-
-    if spreadsheet:
+    if spreadsheet is None:
+        fail_all(GSHEET_CHECKS, "No spreadsheet found with 'meal plan' or 'weekly' in title")
+    else:
+        record("Weekly Meal Plan spreadsheet exists", True)
         spreadsheet_id, title = spreadsheet
         record("Spreadsheet title contains 'meal' or 'weekly'",
                "meal" in title.lower() or "weekly" in title.lower(),
@@ -118,6 +141,10 @@ def check_gcal():
     cur.close()
     conn.close()
 
+    if not events:
+        fail_all(GCAL_CHECKS, "Found 0 events in Apr 7-13")
+        return
+
     record("At least 7 dinner prep events Apr 7-13 2026", len(events) >= 7,
            f"Found {len(events)} events in Apr 7-13")
 
@@ -163,10 +190,10 @@ def check_email():
             matching = (subject, from_addr, to_addr, body_text)
             break
 
-    record("Email sent to meal_planning@service.com", matching is not None,
-           f"Messages found: {len(messages)}")
-
-    if matching:
+    if matching is None:
+        fail_all(EMAIL_CHECKS, f"Messages found: {len(messages)}")
+    else:
+        record("Email sent to meal_planning@service.com", True)
         subject, _, _, body_text = matching
         all_text = ((subject or "") + " " + (body_text or "")).lower()
         has_meal_content = (
