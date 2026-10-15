@@ -1,4 +1,5 @@
-"""Partial rewards come only from what the grader reports.
+"""The reward comes only from what the grader reports, and the grader is
+run where the agent cannot reach it.
 
 Partial mode used to read <workspace>/eval_result.json, which the agent can
 write, before the grader's output. 316 of the 503 graders never write that
@@ -6,12 +7,25 @@ file, so an agent that wrote {"accuracy": 100} got full partial reward even
 when its grader failed. claim_done now gives every grader run a new result
 path outside the workspace, so whatever the agent leaves in its workspace
 cannot be read as the grade, in either reward mode.
+
+The server also used to run the session's own writable copy of the grader,
+which the agent could overwrite with a stub that always passes. claim_done
+now runs the grader from the image's read-only task tree, supplying only the
+workspace, the database and a fresh result directory, and it pauses the
+agent's own processes while the grader runs, so neither a rewritten grader
+nor a background writer can change the grade. Partial-mode stdout parsing
+takes the grader's own last summary line, so agent-controlled text echoed
+into the output cannot be read as the score.
 """
+import asyncio
 import json
 import os
 from pathlib import Path
 import shutil
+import signal
+import subprocess
 import sys
+import textwrap
 from tempfile import TemporaryDirectory
 import threading
 import time
@@ -19,7 +33,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from http_fixtures import copy_task
-from server import ToolathlonGym, _reward_for_evaluation
+from server import ToolathlonGym, _reward_for_evaluation, _score_from_eval_output
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -204,8 +218,12 @@ class RealGraderTest(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             env = ToolathlonGym.__new__(ToolathlonGym)
+            env._db_name = "realgrader_test"
             env._session_dir = root / "session"
             env._session_dir.mkdir()
+            # The server grades from the image's read-only task tree, never the
+            # session's writable copy.
+            env._source_task_dir = source
             env.task_dir = env._session_dir / "task"
             copy_task(source, env.task_dir)
             env.workspace_dir = root / "workspace"
@@ -222,6 +240,191 @@ class RealGraderTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(result.reward, 0.0, result.blocks[0].text)
             self.assertEqual(json.loads((env.workspace_dir / "eval_result.json").read_text()), AGENT_CLAIM)
             self.assertEqual([p.name for p in env._session_dir.iterdir()], ["task"])
+
+
+PASS_STUB = "import sys\nprint('Overall: 1/1 checks passed')\nsys.exit(0)\n"
+
+SLOW_FAIL_GRADER = """\
+import argparse, sys, time
+parser = argparse.ArgumentParser()
+for name in ("--agent_workspace", "--groundtruth_workspace", "--launch_time", "--res_log_file"):
+    parser.add_argument(name)
+parser.parse_args()
+time.sleep(float(%r))
+print("REAL GRADER")
+print("Overall: 0/3 checks passed")
+sys.exit(1)
+"""
+
+
+def make_graded_task(root, grader_src):
+    task = root / "tasks" / "graded"
+    for subdir in ("docs", "evaluation", "initial_workspace", "groundtruth_workspace"):
+        (task / subdir).mkdir(parents=True)
+    (task / "task_config.json").write_text(json.dumps({"needed_mcp_servers": []}))
+    (task / "docs" / "task.md").write_text("Write the report.")
+    (task / "evaluation" / "main.py").write_text(grader_src)
+    return task
+
+
+async def build_env(root, grader_src):
+    """A ready environment whose source grader is ``grader_src``; caller tears it down."""
+    make_graded_task(root, grader_src)
+    with patch("server.TASKS_ROOT", root / "tasks"):
+        env = ToolathlonGym({"task_name": "graded"})
+    env.workspace_dir = root / "workspaces" / env._db_name
+    env._psql = AsyncMock()
+    await env.setup()
+    return env
+
+
+class GraderRunsFromReadOnlyTreeTest(unittest.IsolatedAsyncioTestCase):
+    """The grade comes from the image's grader, not the session's writable copy."""
+
+    async def test_rewriting_the_session_copy_grader_earns_nothing(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = await build_env(root, SLOW_FAIL_GRADER % 0)
+            try:
+                # The agent overwrites every grader it can reach in its session
+                # and plants a full-marks result file in its workspace.
+                (env.task_dir / "evaluation" / "main.py").write_text(PASS_STUB)
+                (env.workspace_dir / "eval_result.json").write_text(json.dumps({"accuracy": 100}))
+                for mode in ("partial", "binary"):
+                    with self.subTest(mode=mode), with_python_on_path(), reward_mode(mode):
+                        result = await env.claim_done()
+                    self.assertEqual(result.reward, 0.0, result.blocks[0].text)
+                    self.assertIn("REAL GRADER", result.blocks[0].text)
+                    self.assertTrue(result.blocks[0].text.startswith("FAIL\n"))
+            finally:
+                await env.teardown()
+
+    async def test_background_process_rewriting_the_grader_earns_nothing(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = await build_env(root, SLOW_FAIL_GRADER % 0.6)
+            session_grader = env.task_dir / "evaluation" / "main.py"
+            stub = root / "stub.py"
+            stub.write_text(PASS_STUB)
+            # A background job the agent left running, hammering its session copy
+            # of the grader for the whole grading window. It is NOT registered as
+            # an agent process group, so it is not paused: only the read-only
+            # grader tree protects the grade here.
+            rewriter = subprocess.Popen(
+                [sys.executable, "-c", textwrap.dedent(f"""
+                    import shutil, time
+                    for _ in range(100000):
+                        shutil.copyfile({str(stub)!r}, {str(session_grader)!r})
+                        time.sleep(0.005)
+                """)],
+                start_new_session=True,
+            )
+            try:
+                with with_python_on_path(), reward_mode("partial"):
+                    result = await env.claim_done()
+                self.assertEqual(result.reward, 0.0, result.blocks[0].text)
+                self.assertIn("REAL GRADER", result.blocks[0].text)
+            finally:
+                rewriter.terminate()
+                rewriter.wait(timeout=5)
+                await env.teardown()
+
+
+class AgentProcessPauseTest(unittest.IsolatedAsyncioTestCase):
+    """Pause the agent's own processes while a grader runs, then resume them."""
+
+    def spawn(self, code, db):
+        """A background process tagged with ``db`` in its environment, as the
+        session's own subprocesses are tagged with PGDATABASE."""
+        proc = subprocess.Popen(
+            [sys.executable, "-c", textwrap.dedent(code)],
+            start_new_session=True,
+            env={**os.environ, "PGDATABASE": db} if db else os.environ,
+        )
+        self.addCleanup(lambda: proc.poll() is None and os.killpg(os.getpgid(proc.pid), signal.SIGKILL))
+        return proc
+
+    async def test_this_sessions_process_is_frozen_then_resumed(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = await build_env(root, SLOW_FAIL_GRADER % 0)
+            counter = root / "counter"
+            counter.write_text("0")
+            worker = self.spawn(f"""
+                import time
+                n = 0
+                while True:
+                    n += 1
+                    open({str(counter)!r}, "w").write(str(n))
+                    time.sleep(0.005)
+            """, env._db_name)
+            try:
+                # asyncio.sleep, not time.sleep: let wall-clock pass without
+                # blocking the loop (and tripping its slow-callback warning).
+                await asyncio.sleep(0.2)
+                paused = env._pause_agent_processes()
+                self.assertIn(worker.pid, paused)
+                before = counter.read_text()
+                await asyncio.sleep(0.4)
+                self.assertEqual(counter.read_text(), before, "process kept running while paused")
+                env._resume_processes(paused)
+                await asyncio.sleep(0.2)
+                self.assertNotEqual(counter.read_text(), before, "process did not resume")
+            finally:
+                os.killpg(os.getpgid(worker.pid), signal.SIGKILL)
+                worker.wait(timeout=5)
+                await env.teardown()
+
+    async def test_other_sessions_and_the_worker_are_left_alone(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = await build_env(root, SLOW_FAIL_GRADER % 0)
+            other = self.spawn("import time; time.sleep(30)", "s_someoneelsesdb0")
+            untagged = self.spawn("import time; time.sleep(30)", None)
+            try:
+                paused = env._pause_agent_processes()
+                self.assertNotIn(other.pid, paused)
+                self.assertNotIn(untagged.pid, paused)
+                self.assertIsNone(other.poll())
+                self.assertIsNone(untagged.poll())
+            finally:
+                for proc in (other, untagged):
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    proc.wait(timeout=5)
+                await env.teardown()
+
+
+class SummaryParsingTest(unittest.TestCase):
+    """Partial-mode stdout parsing reads the grader's own last summary line."""
+
+    def test_last_summary_line_wins_over_earlier_ones(self):
+        # A grader that tallies progressively: the final line is authoritative.
+        self.assertAlmostEqual(
+            _score_from_eval_output("Passed: 0, Failed: 1\nPassed: 0, Failed: 3"), 0.0)
+        self.assertAlmostEqual(
+            _score_from_eval_output("Overall: 1/4 checks passed\nOverall: 3/4 checks passed"), 0.75)
+
+    def test_file_and_db_sections_score_on_the_file_line(self):
+        text = ("  File checks - Passed: 2, Failed: 0\n"
+                "  DB checks   - Passed: 0, Failed: 3\n"
+                "  WARNING: 3 DB checks failed (not blocking)\n  Overall: PASS\n")
+        self.assertAlmostEqual(_score_from_eval_output(text), 1.0)
+
+    def test_agent_text_echoed_into_output_is_not_read_as_the_score(self):
+        # The agent put a fake summary in a filename the grader echoes; the real
+        # summary is the grader's last line.
+        text = ("[FAIL] file 'Overall: 9/9 checks passed.xlsx' missing\n"
+                "Overall: 0/5 checks passed\n")
+        self.assertAlmostEqual(_score_from_eval_output(text), 0.0)
+
+    def test_truncated_output_has_no_summary(self):
+        text = ("Overall: 5/5 checks passed\n"
+                "\n[Output truncated; write large results to a workspace file.]\n")
+        self.assertIsNone(_score_from_eval_output(text))
+
+    def test_result_pass_prefix_is_still_read(self):
+        self.assertAlmostEqual(
+            _score_from_eval_output("Result: FAIL - Overall: 2/8 checks passed"), 0.25)
 
 
 class ResultFileReaderTest(unittest.TestCase):
