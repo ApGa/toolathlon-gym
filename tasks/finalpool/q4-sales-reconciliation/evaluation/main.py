@@ -147,10 +147,7 @@ def check_executive_summary(agent_workspace):
             errors.append("Executive summary is too short (less than 50 chars)")
 
     except ImportError:
-        # If python-docx not available, just check file exists and has size
-        file_size = os.path.getsize(docx_path)
-        if file_size < 100:
-            errors.append("Executive_Summary.docx is suspiciously small")
+        errors.append("python-docx is not installed, so Executive_Summary.docx cannot be checked")
     except Exception as e:
         errors.append(f"Error reading Executive_Summary.docx: {e}")
 

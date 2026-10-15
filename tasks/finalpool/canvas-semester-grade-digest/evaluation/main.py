@@ -175,11 +175,7 @@ def main():
             else:
                 print("    PASS")
         except ImportError:
-            # If python-docx not installed, just check file size
-            if os.path.getsize(word_file) > 100:
-                print("    PASS (file exists, size OK)")
-            else:
-                all_errors.append("Grade_Summary.docx is too small")
+            all_errors.append("python-docx is not installed, so Grade_Summary.docx cannot be checked")
 
     # --- Final result ---
     if all_errors:

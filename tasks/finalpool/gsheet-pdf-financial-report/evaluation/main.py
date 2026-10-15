@@ -291,13 +291,8 @@ def check_word(workspace):
         return True
 
     except ImportError:
-        # Fallback: just check file size
-        file_size = docx_path.stat().st_size
-        if file_size < 1000:
-            print(f"  [FAIL] Word document too small ({file_size} bytes)")
-            return False
-        print(f"  [PASS] Word document exists ({file_size} bytes), python-docx not available for deep check")
-        return True
+        print("  [FAIL] python-docx is not installed, so the Word document cannot be checked")
+        return False
 
 
 def check_pdf(workspace):

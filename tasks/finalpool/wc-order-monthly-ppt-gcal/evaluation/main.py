@@ -89,8 +89,7 @@ def check_ppt(agent_workspace):
               f"Sample: {all_text[:300]}")
 
     except ImportError:
-        check("PPT file has content", os.path.getsize(pptx_path) > 5000,
-              f"Size: {os.path.getsize(pptx_path)}")
+        check("python-pptx available", False, "python-pptx is not installed, so the presentation cannot be checked")
     except Exception as e:
         check("PPT readable", False, str(e))
 
