@@ -9,9 +9,11 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from tempfile import TemporaryDirectory
 import textwrap
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -27,7 +29,8 @@ FAKE_SERVER = textwrap.dedent('''
         print("fake server: cannot import its MCP SDK", file=sys.stderr, flush=True)
         sys.exit(3)
     launch = {"argv": sys.argv[3:], "cwd": os.getcwd(),
-              "env": {k: os.environ.get(k) for k in ("PGDATABASE", "PG_DATABASE", "PGHOST", "PYTHONHASHSEED", "FROM_YAML")}}
+              "env": {k: os.environ.get(k) for k in ("PGDATABASE", "PG_DATABASE", "PGHOST", "PYTHONHASHSEED", "PYTHONPATH",
+                                                      "FROM_YAML")}}
     for line in sys.stdin:
         msg = json.loads(line)
         if "id" not in msg or mode == "silent":
@@ -89,7 +92,11 @@ class DiscoverToolsTest(unittest.TestCase):
     def test_records_every_configured_server_with_its_schemas(self):
         self.config("a.yaml", "alpha")
         self.config("b.yaml", "beta", mode="paged")
-        code, out, err = self.discover()
+        umask = os.umask(0o077)  # a restrictive builder umask must not leave the catalog unreadable
+        try:
+            code, out, err = self.discover()
+        finally:
+            os.umask(umask)
         self.assertEqual(code, 0, out + err)
         catalog = json.loads(self.output.read_text())
         self.assertEqual(self.output.stat().st_mode & 0o777, 0o644, "readable by the server's uid")
@@ -153,6 +160,8 @@ class DiscoverToolsTest(unittest.TestCase):
         self.assertEqual(launch["argv"], [f"{workspace}/out", f"{self.root / 'ws' / '.task'}/email_config.json",
                                           f"{self.root / 'servers'}/x"])
         self.assertEqual(Path(launch["cwd"]).resolve(), workspace.resolve())
+        # runtime_patches comes first on PYTHONPATH, as in server.py's _pg_env (its sitecustomize renames databases).
+        self.assertEqual(launch["env"].pop("PYTHONPATH").split(os.pathsep)[0], discover_tools.RUNTIME_PATCHES)
         # The session database wins over a config's PG_DATABASE, as in server.py.
         self.assertEqual(launch["env"], {"PGDATABASE": "toolathlon_template", "PG_DATABASE": "toolathlon_template",
                                          "PGHOST": "localhost", "PYTHONHASHSEED": "0", "FROM_YAML": "yes"})
@@ -163,6 +172,42 @@ class DiscoverToolsTest(unittest.TestCase):
         self.assertEqual(problems, [])
         self.assertIn("snowflake", configs)
         self.assertEqual(len(configs), len(list((ROOT / "configs" / "mcp_servers").glob("*.yaml"))))
+
+    def test_every_server_a_task_needs_is_configured(self):
+        # Discovery only knows configured servers: a task that names a server with no config would get no tools
+        # for it, and the build would not notice.
+        configs, _ = discover_tools.load_configs(ROOT / "configs" / "mcp_servers")
+        needed: dict[str, list[str]] = {}
+        for path in sorted((ROOT / "tasks" / "finalpool").glob("*/task_config.json")):
+            for server in json.loads(path.read_text()).get("needed_mcp_servers", []):
+                needed.setdefault(server, []).append(path.parent.name)
+        self.assertIn("snowflake", needed)
+        self.assertEqual({server: tasks[:3] for server, tasks in needed.items() if server not in configs}, {})
+
+
+class LocalServerLockTest(unittest.TestCase):
+    """The image runs `uv sync` in every Python MCP server, so each must ship the lock it was tested with.
+
+    mcp-snowflake-server had no uv.lock, so each build resolved `mcp>=1.0.0` afresh. mcp 2 has no
+    Server.list_resources(), the server died at startup, and the c1e58af catalog lost its 14 tools.
+    """
+
+    SERVERS = ROOT / "local_servers"
+
+    def test_every_python_server_has_a_lock(self):
+        projects = sorted(self.SERVERS.glob("*/pyproject.toml"))
+        self.assertIn(self.SERVERS / "mcp-snowflake-server" / "pyproject.toml", projects)
+        self.assertEqual([p.parent.name for p in projects if not p.with_name("uv.lock").is_file()], [])
+
+    def test_snowflake_server_stays_on_mcp_1(self):
+        server = self.SERVERS / "mcp-snowflake-server"
+        locked = [p["version"] for p in tomllib.loads((server / "uv.lock").read_text())["package"] if p["name"] == "mcp"]
+        self.assertEqual(len(locked), 1, locked)
+        self.assertEqual(locked[0].split(".")[0], "1", f"uv.lock resolves mcp {locked[0]}")
+        deps = tomllib.loads((server / "pyproject.toml").read_text())["project"]["dependencies"]
+        mcp = [d.replace(" ", "") for d in deps if re.match(r"mcp\b(?![-_])", d)]
+        self.assertEqual(len(mcp), 1, deps)
+        self.assertIn("<2", mcp[0], "a fresh lock must not move to mcp 2 either")
 
 
 if __name__ == "__main__":
