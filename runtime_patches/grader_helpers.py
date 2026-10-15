@@ -3,12 +3,16 @@
 This directory is on the grader subprocess PYTHONPATH, including when tasks are
 copied into private episode directories.
 """
+import importlib
 import json
 import math
 import re
 import tarfile
 from html.parser import HTMLParser
 from pathlib import Path
+
+# pypdf ships in the image; the others are the readers older graders tried first.
+PDF_READERS = ("pypdf", "PyPDF2", "pdfplumber")
 
 
 def text(value):
@@ -131,3 +135,32 @@ def google_sheet_records(cursor, spreadsheet_title, sheet_title, columns, check)
         return []
     return [{header: row.get(column) for column, header in headers.items()}
             for _, row in sorted(rows.items())]
+
+
+class PdfTextError(Exception):
+    """The text of a PDF deliverable could not be read; the checks on it must fail."""
+
+
+def pdf_text(path):
+    """Return the text of a PDF (pages joined by newlines) from the first PDF_READERS module that reads it.
+
+    A reader that is not installed is skipped, and so is one that cannot parse the file. When none is left,
+    raise PdfTextError, saying what each one did, instead of returning anything, so a grader cannot fall
+    back to checking that the file merely exists.
+    """
+    attempts = []
+    for name in PDF_READERS:
+        try:
+            module = importlib.import_module(name)
+        except ImportError:
+            attempts.append(f"{name} is not installed")
+            continue
+        try:
+            if name == "pdfplumber":
+                with module.open(path) as pdf:
+                    return "\n".join(page.extract_text() or "" for page in pdf.pages)
+            reader = module.PdfReader(path)
+            return "\n".join(page.extract_text() or "" for page in reader.pages)
+        except Exception as error:  # any parser failure: this reader cannot vouch for the text
+            attempts.append(f"{name} could not parse it ({type(error).__name__}: {error})")
+    raise PdfTextError(f"cannot read the text of {Path(path).name}: " + "; ".join(attempts))
