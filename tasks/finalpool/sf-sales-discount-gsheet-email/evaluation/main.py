@@ -22,7 +22,8 @@ def main():
     parser.add_argument("--res_log_file", required=False)
     args = parser.parse_args()
 
-    # All checks for this task are DB-based (gsheet + email).
+    # All checks for this task are DB-based (gsheet + email), so database
+    # errors block: the Google Sheet and the e-mail are the whole deliverable.
     file_errors = []
     db_errors = []
 
@@ -79,26 +80,39 @@ def main():
                         grid[row_idx] = {}
                     grid[row_idx][col_idx] = value
 
-                # Skip header row (row 1), check data rows
-                data_rows = {k: v for k, v in grid.items() if k > 1}
-                if expected_map and len(data_rows) < len(expected_map):
+                # The Sheets tool stores 0-based indices: the first row is the
+                # header, and columns are located by their header names.
+                header_row = min(grid) if grid else None
+                headers = {}
+                if header_row is not None:
+                    for col_idx, value in grid[header_row].items():
+                        headers[str(value or "").strip().lower().replace(" ", "_")] = col_idx
+                data_rows = {k: v for k, v in grid.items() if k != header_row}
+                columns = ["segment", "order_count", "discounted_orders", "discount_rate_pct", "total_revenue"]
+                missing_columns = [c for c in columns if c not in headers]
+                if missing_columns:
+                    db_errors.append(f"Missing columns in Segment Analysis: {missing_columns}")
+                elif expected_map and len(data_rows) < len(expected_map):
                     db_errors.append(f"Expected {len(expected_map)} data rows, found {len(data_rows)}")
                 elif expected_map:
+                    def cell(row_data, column):
+                        return row_data.get(headers[column], "")
+
                     # Check each expected segment is present
                     for seg, exp in expected_map.items():
                         found = False
                         for row_idx, row_data in data_rows.items():
-                            seg_val = row_data.get(1, "")
+                            seg_val = cell(row_data, "segment")
                             if seg_val and str(seg_val).strip().lower() == seg.lower():
                                 found = True
-                                if not num_close(row_data.get(2, ""), exp[1], 20):
-                                    db_errors.append(f"{seg}.Order_Count: {row_data.get(2)} vs {exp[1]}")
-                                if not num_close(row_data.get(3, ""), exp[2], 20):
-                                    db_errors.append(f"{seg}.Discounted_Orders: {row_data.get(3)} vs {exp[2]}")
-                                if not num_close(row_data.get(4, ""), exp[3], 2.0):
-                                    db_errors.append(f"{seg}.Discount_Rate_Pct: {row_data.get(4)} vs {exp[3]}")
-                                if not num_close(row_data.get(6, ""), exp[5], 500):
-                                    db_errors.append(f"{seg}.Total_Revenue: {row_data.get(6)} vs {exp[5]}")
+                                if not num_close(cell(row_data, "order_count"), exp[1], 20):
+                                    db_errors.append(f"{seg}.Order_Count: {cell(row_data, 'order_count')} vs {exp[1]}")
+                                if not num_close(cell(row_data, "discounted_orders"), exp[2], 20):
+                                    db_errors.append(f"{seg}.Discounted_Orders: {cell(row_data, 'discounted_orders')} vs {exp[2]}")
+                                if not num_close(cell(row_data, "discount_rate_pct"), exp[3], 2.0):
+                                    db_errors.append(f"{seg}.Discount_Rate_Pct: {cell(row_data, 'discount_rate_pct')} vs {exp[3]}")
+                                if not num_close(cell(row_data, "total_revenue"), exp[5], 500):
+                                    db_errors.append(f"{seg}.Total_Revenue: {cell(row_data, 'total_revenue')} vs {exp[5]}")
                                 break
                         if not found:
                             db_errors.append(f"Segment '{seg}' not found in sheet")
@@ -126,13 +140,14 @@ def main():
 def _print_and_exit(file_errors, db_errors):
     print(f"\n=== SUMMARY ===")
     print(f"  File errors: {len(file_errors)}")
-    print(f"  DB errors:   {len(db_errors)} (not blocking)")
+    print(f"  DB errors:   {len(db_errors)}")
     if db_errors:
         for e in db_errors[:10]:
             print(f"    [DB] {e}")
     if file_errors:
         for e in file_errors[:10]:
             print(f"    [FILE] {e}")
+    if file_errors or db_errors:
         print(f"  Overall: FAIL")
         sys.exit(1)
     else:
