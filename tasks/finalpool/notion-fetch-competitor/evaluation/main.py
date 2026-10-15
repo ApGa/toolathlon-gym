@@ -286,7 +286,8 @@ def check_notion():
                f"Found {len(non_competitor_pages)} extra page(s): {non_competitor_pages[:3]}")
         all_ok = False
     else:
-        record("No unexpected Notion pages", True)
+        # Without the analysis page there is nothing to validate.
+        record("No unexpected Notion pages", found_page, "No competitor page was created")
 
     return all_ok
 
@@ -297,14 +298,24 @@ def check_memory(agent_workspace):
     if not os.path.isfile(memory_path):
         record("Memory file exists", False, f"Not found: {memory_path}")
         return False
-    record("Memory file exists", True)
 
     try:
         with open(memory_path, "r") as f:
             data = json.load(f)
     except Exception as e:
+        record("Memory file exists", True)
         record("Memory file is valid JSON", False, str(e))
         return False
+
+    # The initial workspace already ships {"notes": []}, and the memory server
+    # writes it back with an empty graph after any call that adds nothing, so
+    # the file only counts once the agent has recorded something in it.
+    empty = not any(data.values()) if isinstance(data, dict) else not data
+    if empty:
+        record("Memory file exists", False, "memory.json holds no notes or entities")
+        return False
+
+    record("Memory file exists", True)
     record("Memory file is valid JSON", True)
 
     content = json.dumps(data).lower()

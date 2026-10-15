@@ -187,13 +187,15 @@ def check_email():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     try:
+        # Only sent mail counts: preprocess injects inbound newsletters to advisor@.
         cur.execute("""
             SELECT id, subject, to_addr, body_text
             FROM email.messages
-            WHERE to_addr::text ILIKE '%%academic_advisors%%'
-               OR to_addr::text ILIKE '%%advisor%%'
-               OR subject ILIKE '%%retention%%risk%%'
-               OR subject ILIKE '%%risk%%analysis%%'
+            WHERE folder_id IN (SELECT id FROM email.folders WHERE LOWER(name) LIKE '%%sent%%')
+              AND (to_addr::text ILIKE '%%academic_advisors%%'
+                   OR to_addr::text ILIKE '%%advisor%%'
+                   OR subject ILIKE '%%retention%%risk%%'
+                   OR subject ILIKE '%%risk%%analysis%%')
         """)
         emails = cur.fetchall()
 
@@ -248,7 +250,15 @@ def check_reverse_validation(workspace):
                           f"Sent to noise recipient: {noise}")
                     cur.close(); conn.close()
                     return
-        check("No risk emails sent to wrong recipients", True)
+        # Without a sent risk e-mail there is nothing to validate.
+        cur.execute("""
+            SELECT COUNT(*) FROM email.messages
+            WHERE folder_id IN (SELECT id FROM email.folders WHERE LOWER(name) LIKE '%%sent%%')
+              AND (subject ILIKE '%%risk%%' OR subject ILIKE '%%retention%%')
+        """)
+        sent = cur.fetchone()[0]
+        check("No risk emails sent to wrong recipients", sent > 0,
+              "No risk e-mail was sent")
         cur.close(); conn.close()
     except Exception as e:
         check("Reverse validation", False, str(e))

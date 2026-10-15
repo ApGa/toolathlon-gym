@@ -326,15 +326,21 @@ def check_memory(agent_workspace):
         record("memory.json exists", False, f"Not found at {mem_file}")
         return False
 
-    record("memory.json exists", True)
-
     try:
         with open(mem_file, "r") as f:
             memory_data = json.load(f)
     except Exception as e:
+        record("memory.json exists", True)
         record("memory.json readable", False, str(e))
         return False
 
+    # The initial workspace already ships this empty knowledge graph, so the
+    # file only counts once the agent has written to it.
+    if memory_data == {"entities": [], "relations": []}:
+        record("memory.json exists", False, "memory.json is still the empty initial file")
+        return False
+
+    record("memory.json exists", True)
     record("memory.json readable", True)
 
     all_ok = True

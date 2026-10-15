@@ -300,8 +300,15 @@ def check_reverse_validation(workspace):
               AND to_addr::text NOT ILIKE '%%committee%%'
         """)
         wrong = cur.fetchone()[0]
-        check("No portfolio emails to wrong recipients", wrong == 0,
-              f"Found {wrong} misrouted emails")
+        # Without the portfolio review e-mail there is nothing to validate.
+        cur.execute("""
+            SELECT COUNT(*) FROM email.messages
+            WHERE folder_id IN (SELECT id FROM email.folders WHERE LOWER(name) LIKE '%%sent%%')
+              AND (lower(subject) LIKE '%%portfolio%%' OR lower(subject) LIKE '%%q1%%')
+        """)
+        sent = cur.fetchone()[0]
+        check("No portfolio emails to wrong recipients", sent > 0 and wrong == 0,
+              f"Found {wrong} misrouted emails" if sent else "No portfolio review e-mail was sent")
         cur.close()
         conn.close()
     except Exception:

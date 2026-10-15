@@ -243,7 +243,7 @@ def check_reverse_validation(workspace):
                   no_noise,
                   f"Found noise content in gsheet values")
         else:
-            check("No noise arxiv papers in gsheet", True, "No spreadsheet to check")
+            check("No noise arxiv papers in gsheet", False, "No Curriculum Gap spreadsheet to check")
 
         cur.close()
         conn.close()

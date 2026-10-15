@@ -1,32 +1,20 @@
 #!/usr/bin/env python3
-"""Evaluation script for task validation"""
+"""Evaluation for a placeholder task that has nothing to grade.
 
-from argparse import ArgumentParser
+The prompt describes a multi-phase project but names no concrete deliverable
+(no file, spreadsheet, form, page, event or e-mail), and the task ships no
+input data or reference output to compare against. The previous grader passed
+whenever the workspace was non-empty, which the shipped placeholder files
+always satisfy, so an episode that did nothing earned full reward. Until the
+task is authored with gradeable deliverables, the grader fails closed.
+"""
+
+import json
 import sys
-from pathlib import Path
+from argparse import ArgumentParser
 
-def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
-    """Numeric comparison with tolerance - uses lower() for string normalization."""
-    return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
+MESSAGE = "Placeholder task: no gradeable deliverable is defined, so no reward is awarded"
 
-
-def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_file):
-    """Run evaluation checks"""
-    
-    # Check if agent workspace has expected outputs
-    if not agent_workspace:
-        return False, "No agent workspace provided"
-    
-    agent_ws = Path(agent_workspace)
-    if not agent_ws.exists():
-        return False, f"Agent workspace not found: {agent_workspace}"
-    
-    # Basic validation: check if any files were created
-    files_created = list(agent_ws.glob("*"))
-    if not files_created:
-        return False, "No files created in agent workspace"
-    
-    return True, "Evaluation passed"
 
 def main():
     parser = ArgumentParser()
@@ -35,16 +23,14 @@ def main():
     parser.add_argument("--res_log_file", required=False)
     parser.add_argument("--launch_time", required=False)
     args = parser.parse_args()
-    
-    success, message = run_evaluation(
-        args.agent_workspace,
-        args.groundtruth_workspace,
-        args.launch_time,
-        args.res_log_file
-    )
-    
-    print(message)
-    sys.exit(0 if success else 1)
+
+    if args.res_log_file:
+        with open(args.res_log_file, "w") as f:
+            json.dump({"total_passed": 0, "total_checks": 1, "accuracy": 0.0}, f)
+
+    print(MESSAGE)
+    sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

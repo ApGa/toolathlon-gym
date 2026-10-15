@@ -252,8 +252,11 @@ def check_reverse_validation(workspace):
               AND start_datetime < '2026-03-10'
         """)
         early_events = cur.fetchone()[0]
-        record("No price review events before March 10", early_events == 0,
-               f"Found {early_events} early events")
+        # Without price review events there is nothing to validate.
+        cur.execute("SELECT COUNT(*) FROM gcal.events WHERE summary ILIKE '%%price review%%'")
+        event_count = cur.fetchone()[0]
+        record("No price review events before March 10", event_count > 0 and early_events == 0,
+               f"Found {early_events} early events" if event_count else "No price review events")
         cur.close()
         conn.close()
     except Exception:

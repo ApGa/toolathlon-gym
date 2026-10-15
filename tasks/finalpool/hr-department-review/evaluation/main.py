@@ -273,10 +273,11 @@ def check_emails():
             all_recipient_emails.add(r)
     expected_emails = {d["manager_email"].lower() for d in EXPECTED_DEPTS.values()}
     unexpected = all_recipient_emails - expected_emails
-    # Allow some tolerance - just warn, don't fail for a couple extra
+    # Allow some tolerance - just warn, don't fail for a couple extra.
+    # Without any manager e-mail there is nothing to validate.
     check("No more than 2 unexpected email recipients",
-          len(unexpected) <= 2,
-          f"Unexpected recipients: {unexpected}")
+          bool(matched_emails) and len(unexpected) <= 2,
+          f"Unexpected recipients: {unexpected}" if matched_emails else "No manager e-mail was sent")
 
     cur.close()
     conn.close()

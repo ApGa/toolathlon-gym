@@ -271,9 +271,10 @@ def check_reverse_validation(workspace):
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
+        # The e-mail tool stores the sender as "Name <address>", so match the address.
         cur.execute("""
             SELECT to_addr FROM email.messages
-            WHERE from_addr = 'coordinator@assessment.example.com'
+            WHERE from_addr ILIKE '%%coordinator@assessment.example.com%%'
         """)
         sent_emails = cur.fetchall()
         noise_recipients = ["all-staff@university.edu", "faculty@university.edu",
@@ -286,7 +287,9 @@ def check_reverse_validation(workspace):
                           f"Sent to noise recipient: {noise}")
                     cur.close(); conn.close()
                     return
-        check("No email sent to noise recipients", True)
+        # Without sent mail there is nothing to validate.
+        check("No email sent to noise recipients", bool(sent_emails),
+              "No e-mail was sent from coordinator@assessment.example.com")
         cur.close(); conn.close()
     except Exception as e:
         check("Reverse validation", False, str(e))

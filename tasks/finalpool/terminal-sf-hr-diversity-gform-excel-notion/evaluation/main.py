@@ -247,7 +247,8 @@ def check_reverse_validation(workspace):
             WHERE archived = false AND LOWER(title::text) LIKE '%%diversity%%'
         """)
         db_count = cur.fetchone()[0]
-        check("No duplicate Diversity Metrics databases", db_count <= 1,
+        # Exactly one: zero means the dashboard was never created.
+        check("No duplicate Diversity Metrics databases", db_count == 1,
               f"Found {db_count} diversity databases")
         cur.close()
         conn.close()

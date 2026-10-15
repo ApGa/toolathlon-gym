@@ -184,7 +184,8 @@ def check_reverse_validation(workspace):
             title_str = json.dumps(title).lower() if title else ""
             if "market" in title_str and "research" in title_str:
                 market_dbs.append(db_id)
-        check("No duplicate Market Research databases", len(market_dbs) <= 1,
+        # Exactly one: zero means the dashboard was never created.
+        check("No duplicate Market Research databases", len(market_dbs) == 1,
               f"Found {len(market_dbs)} matching databases")
         cur.close()
         conn.close()

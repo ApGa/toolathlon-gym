@@ -44,33 +44,60 @@ def record(name, passed, detail=""):
         print(f"  [FAIL] {name}{msg}")
 
 
+def fail_all(names, detail):
+    """A missing deliverable fails every check that depends on it."""
+    for name in names:
+        record(name, False, detail)
+
+
+EXCEL_CHECKS = [
+    "Reading_List.xlsx exists",
+    "Excel file readable",
+    "Papers sheet exists",
+    "Has required columns (ArXiv_ID and Title)",
+    "Has at least 5 data rows (papers)",
+    "Contains key LLM reasoning paper keywords",
+    "Contains LLM_Reasoning topic classification",
+]
+FORM_CHECKS = [
+    "Reading Group Paper Selection form exists",
+    "Form has at least 3 questions",
+    "Form has paper priority/selection question",
+]
+GCAL_CHECKS = [
+    "At least 4 reading group events in April 2026",
+    "Reading sessions are ~1.5 hours",
+    "Sessions on different days (at least 3 distinct dates)",
+]
+
+
 def check_excel(agent_workspace):
     print("\n=== Check 1: Excel Reading_List.xlsx ===")
 
     xlsx_path = os.path.join(agent_workspace, "Reading_List.xlsx")
     if not os.path.exists(xlsx_path):
-        record("Reading_List.xlsx exists", False, f"Not found at {xlsx_path}")
+        fail_all(EXCEL_CHECKS, f"Not found at {xlsx_path}")
         return
     record("Reading_List.xlsx exists", True)
 
     try:
         wb = openpyxl.load_workbook(xlsx_path)
     except Exception as e:
-        record("Excel file readable", False, str(e))
+        fail_all(EXCEL_CHECKS[1:], str(e))
         return
     record("Excel file readable", True)
 
     # Find Papers sheet
     sheet_names_lower = [s.lower() for s in wb.sheetnames]
     if "papers" not in sheet_names_lower:
-        record("Papers sheet exists", False, f"Sheets: {wb.sheetnames}")
+        fail_all(EXCEL_CHECKS[2:], f"Sheets: {wb.sheetnames}")
         return
     record("Papers sheet exists", True)
 
     ws = wb[wb.sheetnames[sheet_names_lower.index("papers")]]
     rows = list(ws.iter_rows(values_only=True))
     if not rows:
-        record("Has data rows", False, "Sheet is empty")
+        fail_all(EXCEL_CHECKS[3:], "Sheet is empty")
         return
 
     # Check header row
@@ -112,10 +139,10 @@ def check_gform():
             reading_form = (form_id, title)
             break
 
-    record("Reading Group Paper Selection form exists", reading_form is not None,
-           f"Forms found: {[f[1] for f in forms]}")
-
-    if reading_form:
+    if reading_form is None:
+        fail_all(FORM_CHECKS, f"Forms found: {[f[1] for f in forms]}")
+    else:
+        record("Reading Group Paper Selection form exists", True)
         form_id, title = reading_form
         cur.execute("SELECT COUNT(*) FROM gform.questions WHERE form_id = %s", (form_id,))
         q_count = cur.fetchone()[0]
@@ -152,6 +179,10 @@ def check_gcal():
         e for e in events
         if "reading group" in (e[0] or "").lower() or "reading session" in (e[0] or "").lower()
     ]
+
+    if not reading_events:
+        fail_all(GCAL_CHECKS, "Found 0 reading events in April 2026")
+        return
 
     record("At least 4 reading group events in April 2026", len(reading_events) >= 4,
            f"Found {len(reading_events)} reading events in April 2026")

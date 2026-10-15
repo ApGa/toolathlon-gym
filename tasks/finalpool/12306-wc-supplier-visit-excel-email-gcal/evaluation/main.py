@@ -217,8 +217,9 @@ def check_emails():
 
     record("At least 1 email sent to supplier or procurement", len(outgoing) >= 1,
            f"Total messages: {len(messages)}, matching: {len(outgoing)}")
-    record("At least 2 emails sent total (supplier visits + summary)", len(messages) >= 2,
-           f"Found {len(messages)} total messages")
+    # The two inbound supplier e-mails injected by preprocess are not sent mail.
+    record("At least 2 emails sent total (supplier visits + summary)", len(outgoing) >= 2,
+           f"Found {len(outgoing)} outgoing messages ({len(messages)} total)")
 
     to_shanghai = [m for m in messages if "shanghai_supplier@techworld.com" in to_addresses(m[2])]
     record("Email sent to shanghai_supplier@techworld.com", len(to_shanghai) >= 1,

@@ -268,8 +268,27 @@ def check_calendar(expected):
     event_names = [(event[0] or "").partition(":")[2].strip().casefold() for event in events]
     check("Follow-up events cover the critical customers",
           set(expected_scores).issubset(event_names))
-    scheduled_scores = [expected_scores[name] for name in event_names if name in expected_scores]
-    check("Follow-up events ordered by health score", scheduled_scores == sorted(scheduled_scores))
+    # Several critical customers share a name, so an event stands for any of
+    # them: the schedule is ordered if its events can take those customers'
+    # scores in non-decreasing order. An empty schedule orders nothing.
+    remaining = {}
+    for r in expected["below_15"]:
+        remaining.setdefault(r[0].strip().casefold(), []).append(float(r[6]))
+    for scores in remaining.values():
+        scores.sort()
+    scheduled, ordered, previous = 0, True, float("-inf")
+    for name in event_names:
+        scores = remaining.get(name)
+        if not scores:
+            continue
+        score = next((s for s in scores if s >= previous), None)
+        if score is None:
+            ordered = False
+            break
+        scores.remove(score)
+        scheduled += 1
+        previous = score
+    check("Follow-up events ordered by health score", scheduled > 0 and ordered)
 
     # Check events start from 2026-03-09
     if events:

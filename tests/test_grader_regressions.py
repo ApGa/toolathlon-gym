@@ -121,7 +121,7 @@ class GraderRegressionsTest(unittest.TestCase):
             wb["Topic_Summary"].append(["AI", 4, 0, 0])
             self.assertGreater(self.grade_report(root, wb), 0)
 
-    def test_support_resolution_queries_reach_file_grading_without_sql_exception(self):
+    def test_support_resolution_queries_reach_email_check_without_sql_exception(self):
         for name in ["gsheet.spreadsheets", "gsheet.sheets", "gsheet.cells", "email.messages"]:
             self.table(name)
         with self.conn.cursor() as cur:
@@ -133,5 +133,6 @@ class GraderRegressionsTest(unittest.TestCase):
                 with self.assertRaises(SystemExit) as result:
                     grader.main()
             self.assertEqual(result.exception.code, 1)
-            self.assertIn("Support_Resolution_Analysis.xlsx not found", output.getvalue())
             self.assertIn("Checking By Priority", output.getvalue())
+            self.assertIn("No email to support-lead@company.com found", output.getvalue())
+            self.assertIn("Overall: FAIL", output.getvalue())

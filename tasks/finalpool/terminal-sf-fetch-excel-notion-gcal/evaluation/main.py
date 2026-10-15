@@ -195,7 +195,8 @@ def check_reverse_validation(workspace):
             WHERE LOWER(title::text) LIKE '%%sla%%'
         """)
         db_count = cur.fetchone()[0]
-        check("No duplicate SLA databases in Notion", db_count <= 1,
+        # Exactly one: zero means the dashboard was never created.
+        check("No duplicate SLA databases in Notion", db_count == 1,
               f"Found {db_count} SLA databases")
         cur.close()
         conn.close()

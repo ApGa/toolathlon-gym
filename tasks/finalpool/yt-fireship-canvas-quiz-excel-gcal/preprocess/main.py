@@ -2,6 +2,8 @@
 Preprocess for yt-fireship-canvas-quiz-excel-gcal task.
 
 Clears email, gcal tables.
+Removes the seed's leftover "TypeScript Essentials Quiz" (Canvas quiz 78 with
+10 questions), which is the quiz this task asks the agent to create.
 Injects 2 gcal events and 1 email from students@webdev.edu.
 
 Prerequisites:
@@ -48,6 +50,16 @@ def clear_tables(conn):
             pass
     conn.commit()
     print("[preprocess] Cleared gcal and email tables.")
+
+
+def remove_seeded_quiz(conn):
+    # The template database already holds a finished "TypeScript Essentials Quiz".
+    # Left in place it leaks the expected output and grades as the agent's quiz.
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM canvas.quizzes WHERE title ILIKE '%typescript%'")
+        removed = cur.rowcount
+    conn.commit()
+    print(f"[preprocess] Removed {removed} seeded TypeScript quiz(zes).")
 
 
 def inject_gcal_events(conn):
@@ -106,6 +118,7 @@ def main():
     conn = psycopg2.connect(**DB_CONFIG)
     try:
         clear_tables(conn)
+        remove_seeded_quiz(conn)
         inject_gcal_events(conn)
         folder_id = ensure_email_folder(conn)
         inject_email(conn, folder_id)

@@ -110,7 +110,8 @@ def check_gform():
         forms = cur.fetchall()
         lunch_form = None
         for form_id, title in forms:
-            if title and ("lunch" in title.lower() or "preference" in title.lower() or "employee" in title.lower()):
+            # "employee" alone also matches the seeded "Old Employee Survey" noise form.
+            if title and ("lunch" in title.lower() or "preference" in title.lower()):
                 lunch_form = (form_id, title)
                 break
         check("Lunch preference survey form exists", lunch_form is not None,
@@ -181,13 +182,15 @@ def check_email():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     try:
+        # Only sent mail counts: preprocess injects an inbound notice to all_staff@.
         cur.execute("""
             SELECT id, subject, to_addr, body_text
             FROM email.messages
-            WHERE to_addr::text ILIKE '%%all_staff%%'
-               OR subject ILIKE '%%lunch program%%'
-               OR subject ILIKE '%%lunch%%survey%%'
-               OR subject ILIKE '%%employee%%lunch%%'
+            WHERE folder_id IN (SELECT id FROM email.folders WHERE LOWER(name) LIKE '%%sent%%')
+              AND (to_addr::text ILIKE '%%all_staff%%'
+                   OR subject ILIKE '%%lunch program%%'
+                   OR subject ILIKE '%%lunch%%survey%%'
+                   OR subject ILIKE '%%employee%%lunch%%')
         """)
         emails = cur.fetchall()
         if not emails:
@@ -244,8 +247,14 @@ def check_reverse_validation(workspace):
             WHERE subject ILIKE '%%lunch%%' AND to_addr::text ILIKE '%%competitor%%'
         """)
         bad_emails = cur.fetchone()[0]
-        check("No lunch emails to competitor addresses", bad_emails == 0,
-              f"Found {bad_emails}")
+        cur.execute("""
+            SELECT COUNT(*) FROM email.messages
+            WHERE folder_id IN (SELECT id FROM email.folders WHERE LOWER(name) LIKE '%%sent%%')
+              AND subject ILIKE '%%lunch%%'
+        """)
+        sent = cur.fetchone()[0]
+        check("No lunch emails to competitor addresses", sent > 0 and bad_emails == 0,
+              f"Found {bad_emails}" if bad_emails else "No lunch e-mail was sent")
         cur.close()
         conn.close()
     except Exception:

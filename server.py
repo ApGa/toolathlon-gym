@@ -22,10 +22,12 @@ import os
 import random
 import re
 import shutil
+import stat
 import tempfile
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from signal import SIGCONT, SIGSTOP
 from typing import Any, Sequence
 from uuid import uuid4
 
@@ -60,6 +62,9 @@ MCP_OUTPUT_MAX_CHARS = int(os.getenv("OPENREWARD_MCP_OUTPUT_MAX_CHARS", "50000")
 MCP_OUTPUT_MAX_JSON_STRING_CHARS = int(os.getenv("OPENREWARD_MCP_OUTPUT_MAX_JSON_STRING_CHARS", "2000"))
 MCP_SUBPROCESS_STREAM_LIMIT = int(os.getenv("OPENREWARD_MCP_SUBPROCESS_STREAM_LIMIT", str(16 * 1024 * 1024)))
 REWARD_MODE_ENV = "OPENREWARD_REWARD_MODE"
+GRADER_RESULT_FILE = "eval_result.json"
+GRADER_RESULT_MAX_BYTES = 16 * 1024 * 1024
+GRADER_TIMEOUT_S = 120
 TOOL_ROUTING_SCHEMA_KEY = "x-openhands-tool-routing"
 TOOL_ERROR_META_KEY = "openhands.dev/tool-error"
 
@@ -266,32 +271,94 @@ def _score_from_result_json(value: Any) -> float | None:
     return None
 
 
-def _score_from_eval_output(output: str) -> float | None:
-    patterns = (
-        r"Overall:\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s+checks\s+passed",
-        r"Results?:\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s+passed",
-        r"Passed:\s*(\d+(?:\.\d+)?)\s*,?\s*Failed:\s*(\d+(?:\.\d+)?)",
+# A summary starts its line, after optional indentation, a "===" banner, a
+# "File checks -"/"DB checks -" section label or a "Result: PASS -" prefix.
+_SUMMARY_LINE_START = (
+    r"^[ \t]*(?:=+[ \t]*)?"
+    r"(?:(?P<section>File|DB)[ \t]+checks[ \t]*-[ \t]*)?"
+    r"(?:Result:[ \t]*(?:PASS|FAIL)[ \t]*-[ \t]*)?"
+)
+_SUMMARY_PATTERNS = tuple(
+    re.compile(_SUMMARY_LINE_START + body, re.IGNORECASE | re.MULTILINE)
+    for body in (
+        r"Overall:\s*(?P<passed>\d+(?:\.\d+)?)\s*/\s*(?P<total>\d+(?:\.\d+)?)\s+checks\s+passed",
+        r"Results?:\s*(?P<passed>\d+(?:\.\d+)?)\s*/\s*(?P<total>\d+(?:\.\d+)?)\s+passed",
+        r"Passed:\s*(?P<passed>\d+(?:\.\d+)?)\s*,?\s*Failed:\s*(?P<failed>\d+(?:\.\d+)?)",
     )
-    for pattern in patterns:
-        match = re.search(pattern, output, re.IGNORECASE)
-        if not match:
-            continue
-        first = float(match.group(1))
-        second = float(match.group(2))
-        if "failed" in pattern.lower():
-            return _score_from_counts(first, failed=second)
-        return _score_from_counts(first, second)
-    return None
+)
+# run_task_process appends this when it cuts the output short.
+_OUTPUT_TRUNCATED_NOTICE = "[Output truncated; write large results to a workspace file.]"
+
+
+def _score_from_eval_output(output: str) -> float | None:
+    """The fraction of checks passed, from the grader's last summary line.
+
+    ``output`` is the grader's stdout. In 9,172 recorded grader outputs (the
+    no-op audits and the v16 training epoch) every summary starts its line
+    and only fixed status lines follow the last one, while text a grader
+    echoes from the agent's work comes before it or after a label. So the
+    last summary that starts a line is the grader's own; an earlier one may
+    not be. Graders that report "File checks" and "DB checks" separately
+    keep being scored on their File checks, the line before the DB checks.
+    Output cut short may have lost the grader's summary, so it has none.
+    """
+    if output.rstrip().endswith(_OUTPUT_TRUNCATED_NOTICE):
+        return None
+    matches = sorted(
+        (match for pattern in _SUMMARY_PATTERNS for match in pattern.finditer(output)),
+        key=lambda match: match.end(),
+    )
+    if not matches:
+        return None
+    chosen = matches[-1]
+    if (
+        len(matches) > 1
+        and (chosen.group("section") or "").lower() == "db"
+        and (matches[-2].group("section") or "").lower() == "file"
+        and not output[matches[-2].end():chosen.start()].strip()
+    ):
+        chosen = matches[-2]
+    groups = chosen.groupdict()
+    if groups.get("failed") is not None:
+        return _score_from_counts(groups["passed"], failed=groups["failed"])
+    return _score_from_counts(groups["passed"], groups["total"])
+
+
+def _load_grader_result(res_log: Path) -> Any:
+    """Parse the result file the grader wrote, or return None.
+
+    Only a regular file is read, never a symlink, FIFO or device, so nothing
+    placed at the path can redirect the read or block the server.
+    """
+    try:
+        fd = os.open(res_log, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > GRADER_RESULT_MAX_BYTES:
+                return None
+            data = stream.read(GRADER_RESULT_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > GRADER_RESULT_MAX_BYTES:
+        return None
+    try:
+        return json.loads(data)
+    except (ValueError, RecursionError):
+        return None
 
 
 def _partial_reward_from_grader(res_log: Path, output: str) -> float | None:
-    if res_log.exists():
-        try:
-            score = _score_from_result_json(json.loads(res_log.read_text()))
-            if score is not None:
-                return score
-        except (OSError, json.JSONDecodeError):
-            pass
+    """The grader's fraction of passed checks: its result file, else its stdout.
+
+    ``res_log`` must not exist before the grader starts: claim_done puts it in
+    a new directory outside the agent's workspace.
+    """
+    score = _score_from_result_json(_load_grader_result(res_log))
+    if score is not None:
+        return score
     return _score_from_eval_output(output)
 
 
@@ -813,6 +880,72 @@ class ToolathlonGym(Environment):
         fixture = getattr(self, "_http_fixture", None)
         return fixture.rewrite(value) if fixture is not None else value
 
+    def _session_agent_pids(self) -> list[int]:
+        """Live PIDs that run under this session, for pausing while the grader runs.
+
+        Every process this session starts for the agent — the MCP servers, the
+        commands the terminal MCP runs, and python_execute and whatever it
+        spawns — inherits ``PGDATABASE=<this session's db>`` in its environment
+        (``_pg_env``). The postgres backends do not (they inherit the
+        postmaster's environment), and neither does this worker, which serves
+        other sessions too. So a process of our own uid whose environment names
+        this session's database belongs to this session, wherever it has been
+        reparented. A process that replaced its own environment after exec is
+        the documented gap; it still cannot touch the read-only grader, and the
+        result path exists only for this grading.
+        """
+        if self._session_dir is None:
+            return []
+        marker = f"PGDATABASE={self._db_name}".encode()
+        euid = os.geteuid()
+        me = os.getpid()
+        found: list[int] = []
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            if pid == me:
+                continue
+            try:
+                if os.stat(f"/proc/{pid}").st_uid != euid:
+                    continue
+                environ = (Path("/proc") / entry / "environ").read_bytes()
+            except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+                continue
+            if marker in environ.split(b"\0"):
+                found.append(pid)
+        return found
+
+    def _pause_agent_processes(self) -> list[int]:
+        """Freeze this session's agent processes; return the PIDs actually stopped.
+
+        Rescan until no new process appears, so a process that forked between
+        the scan and the stop is caught on the next pass (a stopped process
+        cannot fork again).
+        """
+        paused: list[int] = []
+        seen: set[int] = set()
+        for _ in range(5):
+            pids = [pid for pid in self._session_agent_pids() if pid not in seen]
+            if not pids:
+                break
+            for pid in pids:
+                seen.add(pid)
+                try:
+                    os.kill(pid, SIGSTOP)
+                    paused.append(pid)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        return paused
+
+    @staticmethod
+    def _resume_processes(pids: Sequence[int]) -> None:
+        for pid in pids:
+            try:
+                os.kill(pid, SIGCONT)
+            except (ProcessLookupError, PermissionError):
+                pass
+
     def get_prompt(self) -> Sequence[TextBlock]:
         parts = [
             f"Task launch time: {self._launch_time_display}.\n"
@@ -1019,8 +1152,18 @@ class ToolathlonGym(Environment):
 
     @tool
     async def claim_done(self) -> ToolOutput:
-        """Signal that the task is complete and trigger evaluation."""
-        eval_script = self.task_dir / "evaluation" / "main.py"
+        """Signal that the task is complete and trigger evaluation.
+
+        The grader runs from the image's read-only task tree
+        (``_source_task_dir``), never the session's writable copy, so the agent
+        cannot rewrite the grader it is scored by. The session supplies only
+        its workspace, its database (through the environment) and a fresh
+        result directory created here, outside the workspace, for this grading
+        alone. The agent's own processes are paused for the duration, so a
+        background job it left running cannot write the result file or anything
+        the grader reads while the grader runs.
+        """
+        eval_script = self._source_task_dir / "evaluation" / "main.py"
         if not eval_script.exists():
             return ToolOutput(
                 blocks=[TextBlock(text="No evaluation script found.")],
@@ -1028,19 +1171,26 @@ class ToolathlonGym(Environment):
                 finished=True,
             )
 
-        res_log = self.workspace_dir / "eval_result.json"
-        groundtruth = self.task_dir / "groundtruth_workspace"
+        groundtruth = self._source_task_dir / "groundtruth_workspace"
+        result_dir = None
+        paused: list[int] = []
 
         try:
+            paused = self._pause_agent_processes()
+            # A new directory outside the agent's workspace: the reward can only
+            # come from a file written while this grader runs, never from an
+            # eval_result.json the agent left in its workspace.
+            result_dir = Path(tempfile.mkdtemp(prefix="grader-result-", dir=self._session_dir))
+            res_log = result_dir / GRADER_RESULT_FILE
             proc = await run_task_process(
                 "python3", str(eval_script),
                 "--agent_workspace", str(self.workspace_dir),
                 "--groundtruth_workspace", str(groundtruth),
                 "--launch_time", self._launch_time,
                 "--res_log_file", str(res_log),
-                cwd=str(self.task_dir / "evaluation"),
+                cwd=str(eval_script.parent),
                 env={**os.environ, **self._pg_env()},
-                timeout=120,
+                timeout=GRADER_TIMEOUT_S,
             )
             output = proc.stdout + proc.stderr
 
@@ -1060,7 +1210,7 @@ class ToolathlonGym(Environment):
                 )
         except asyncio.TimeoutError:
             return ToolOutput(
-                blocks=[TextBlock(text="Evaluation timed out after 120s")],
+                blocks=[TextBlock(text=f"Evaluation timed out after {GRADER_TIMEOUT_S}s")],
                 reward=0.0,
                 finished=True,
             )
@@ -1070,6 +1220,12 @@ class ToolathlonGym(Environment):
                 reward=0.0,
                 finished=True,
             )
+        finally:
+            # The episode ends here, but resume anyway so teardown can close the
+            # MCP servers gracefully; its own cleanup reaps whatever remains.
+            self._resume_processes(paused)
+            if result_dir is not None:
+                shutil.rmtree(result_dir, ignore_errors=True)
 
     @tool
     async def python_execute(self, params: PythonExecuteInput) -> ToolOutput:

@@ -359,14 +359,22 @@ def check_reverse_validation():
             "newsletter@company.com",
             "sales_team@company.com",
         ]
+        # Without the strategy e-mails there is nothing to validate.
+        cur.execute("""
+            SELECT COUNT(*) FROM email.messages
+            WHERE folder_id IN (SELECT id FROM email.folders WHERE LOWER(name) LIKE '%%sent%%')
+              AND (to_addr::text ILIKE '%%ceo@company.com%%'
+                   OR to_addr::text ILIKE '%%marketing_team@company.com%%')
+        """)
+        sent = cur.fetchone()[0]
         for addr in noise_recipients:
             cur.execute(
                 "SELECT COUNT(*) FROM email.messages WHERE to_addr::text ILIKE %s",
                 (f"%{addr}%",),
             )
             cnt = cur.fetchone()[0]
-            check(f"No email sent to noise recipient {addr}", cnt == 0,
-                  f"Found {cnt} emails to {addr}")
+            check(f"No email sent to noise recipient {addr}", sent > 0 and cnt == 0,
+                  f"Found {cnt} emails to {addr}" if sent else "No strategy e-mail was sent")
     except Exception as e:
         check("Reverse validation", False, str(e))
     finally:

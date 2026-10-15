@@ -280,8 +280,6 @@ def check_reverse_validation(workspace):
               AND EXTRACT(DOW FROM start_datetime) IN (0, 6)
         """)
         weekend_events = cur.fetchall()
-        check("No strategy review events on weekends", len(weekend_events) == 0,
-              f"Found {len(weekend_events)} weekend events: {weekend_events}")
 
         # Check no duplicate strategy review events
         cur.execute("""
@@ -291,7 +289,11 @@ def check_reverse_validation(workspace):
                OR lower(summary) LIKE '%%sales%%strategy%%review%%'
         """)
         event_count = cur.fetchone()[0]
-        check("No duplicate strategy review events", event_count <= 1,
+        # Without the review event there is nothing to validate.
+        check("No strategy review events on weekends", event_count > 0 and len(weekend_events) == 0,
+              f"Found {len(weekend_events)} weekend events: {weekend_events}" if event_count
+              else "No strategy review event")
+        check("No duplicate strategy review events", event_count == 1,
               f"Found {event_count} strategy review events, expected 1")
 
         # Check Research_Insights sheet does not contain noise papers

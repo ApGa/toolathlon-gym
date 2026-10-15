@@ -357,9 +357,11 @@ def check_email():
               "salary" in body_lower or "compensation" in body_lower,
               "No salary/compensation mention")
 
-    # Reverse check: noise email should still exist
+    # Reverse check: noise email should still exist. Without the summary
+    # e-mail there is nothing to validate.
     noise_found = any("renovation" in (subj or "").lower() for subj, _, _, _ in all_emails)
-    check("Noise email not deleted", noise_found, "Office Renovation email missing")
+    check("Noise email not deleted", target_email is not None and noise_found,
+          "Office Renovation email missing" if target_email else "No summary e-mail was sent")
 
 
 def main():
