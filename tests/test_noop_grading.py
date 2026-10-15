@@ -239,7 +239,11 @@ class Episode:
     @staticmethod
     def dsn(dbname):
         import psycopg2.extensions
-        return psycopg2.extensions.make_dsn(PG_DSN, dbname=dbname, options="-c TimeZone=UTC")
+        # UTF8 whatever the cluster's encoding, as the other seeded tests set it:
+        # on a SQL_ASCII cluster psycopg2 would encode with ASCII, and the seed's
+        # non-ASCII rows could not load.
+        return psycopg2.extensions.make_dsn(PG_DSN, dbname=dbname, client_encoding="UTF8",
+                                            options="-c TimeZone=UTC")
 
     @classmethod
     def admin(cls, sql):
