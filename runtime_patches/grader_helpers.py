@@ -8,6 +8,7 @@ import json
 import math
 import re
 import tarfile
+import unicodedata
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -146,7 +147,9 @@ def pdf_text(path):
 
     A reader that is not installed is skipped, and so is one that cannot parse the file. When none is left,
     raise PdfTextError, saying what each one did, instead of returning anything, so a grader cannot fall
-    back to checking that the file merely exists.
+    back to checking that the file merely exists. The text is NFKC-normalized, so the ligature glyphs that
+    browsers and office suites print for "fi", "fl" and "ff" (U+FB01 and the like, as the readers return them)
+    read as those letters again: Chromium prints "Asia Pacific" with one.
     """
     attempts = []
     for name in PDF_READERS:
@@ -158,9 +161,12 @@ def pdf_text(path):
         try:
             if name == "pdfplumber":
                 with module.open(path) as pdf:
-                    return "\n".join(page.extract_text() or "" for page in pdf.pages)
-            reader = module.PdfReader(path)
-            return "\n".join(page.extract_text() or "" for page in reader.pages)
+                    text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+            else:
+                reader = module.PdfReader(path)
+                text = "\n".join(page.extract_text() or "" for page in reader.pages)
         except Exception as error:  # any parser failure: this reader cannot vouch for the text
             attempts.append(f"{name} could not parse it ({type(error).__name__}: {error})")
+            continue
+        return unicodedata.normalize("NFKC", text)
     raise PdfTextError(f"cannot read the text of {Path(path).name}: " + "; ".join(attempts))

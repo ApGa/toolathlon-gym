@@ -173,6 +173,16 @@ class PdfTextTest(unittest.TestCase):
         with patch.dict(sys.modules, {"pypdf": broken, "PyPDF2": None, "pdfplumber": plumber}):
             self.assertEqual(pdf_text(path), "from pdfplumber", "a reader that cannot parse is skipped")
 
+    def test_ligatures_read_as_letters(self):
+        # Chromium and office suites print "fi", "fl" and "ff" as ligature glyphs, which pypdf returns as
+        # U+FB01, U+FB02 and U+FB00: sf-sales-region-pdf-gsheet's "asia pacific" check failed on a printed PDF.
+        path = self.write("a.pdf", b"%PDF-1.4 ...")
+        printed = ModuleType("pypdf")
+        printed.PdfReader = lambda _path: SimpleNamespace(
+            pages=[SimpleNamespace(extract_text=lambda: "Asia Paciﬁc, cash ﬂow, staﬀ")])
+        with patch.dict(sys.modules, {"pypdf": printed}):
+            self.assertEqual(pdf_text(path), "Asia Pacific, cash flow, staff")
+
 
 class PdfCheckTest(unittest.TestCase):
     """check_pdf of the three graders the c1e58af review found checking existence only."""
