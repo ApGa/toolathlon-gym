@@ -180,7 +180,9 @@ RUN chmod +x /app/entrypoint.sh
 # Bake the seed and the MCP tool catalog into the image:
 #   1. Restore init.sql.gz into `toolathlon_template`.
 #   2. Run discover_tools.py against the template so tool_schemas.json ships
-#      in the image (no runtime discovery, no runtime DB restore).
+#      in the image (no runtime discovery, no runtime DB restore). It fails the
+#      build when a server in configs/mcp_servers cannot be asked for its tools
+#      or lists none: server.py offers a task only the tools in this catalog.
 #   3. Mark the seed as a Postgres template so per-session DBs can clone it
 #      with `CREATE DATABASE ... TEMPLATE toolathlon_template`.
 RUN service postgresql start && \
