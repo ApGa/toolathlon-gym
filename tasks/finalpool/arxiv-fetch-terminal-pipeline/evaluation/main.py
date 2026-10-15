@@ -41,6 +41,22 @@ EXPECTED_PAPER_IDS = {"2107.03374", "2002.08155", "2203.07814", "2305.06161"}
 EXPECTED_TOTAL_CITATIONS = 9000
 
 
+def is_empty_memory(content):
+    """True for memory.json text that holds no entity, relation or note.
+
+    The initial workspace ships "{}", and the memory server writes the file
+    back as an empty graph after any call that adds nothing, so neither is
+    memory the agent recorded.
+    """
+    if not content:
+        return True
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return False
+    return not any(data.values()) if isinstance(data, dict) else not data
+
+
 def check_memory(agent_workspace):
     """Check that memory.json has entities for papers and research session."""
     print("\n=== Checking Memory ===")
@@ -52,10 +68,10 @@ def check_memory(agent_workspace):
             content = f.read().strip()
 
     # The initial workspace already ships an empty memory.json ("{}"), so the
-    # file only counts once the agent has written to it.
-    if not content or content == "{}":
-        check("memory.json exists", False, f"Missing or still the empty initial file: {memory_path}")
-        check("Memory has content", False, "memory.json is empty")
+    # file only counts once the agent has recorded something in it.
+    if is_empty_memory(content):
+        check("memory.json exists", False, f"Missing or empty: {memory_path}")
+        check("Memory has content", False, "memory.json holds no entities")
         return
 
     check("memory.json exists", True)

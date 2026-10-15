@@ -307,10 +307,12 @@ def check_memory(agent_workspace):
         record("Memory file is valid JSON", False, str(e))
         return False
 
-    # The initial workspace already ships {"notes": []}, so the file only
-    # counts once the agent has written to it.
-    if data == {"notes": []}:
-        record("Memory file exists", False, "memory.json is still the empty initial file")
+    # The initial workspace already ships {"notes": []}, and the memory server
+    # writes it back with an empty graph after any call that adds nothing, so
+    # the file only counts once the agent has recorded something in it.
+    empty = not any(data.values()) if isinstance(data, dict) else not data
+    if empty:
+        record("Memory file exists", False, "memory.json holds no notes or entities")
         return False
 
     record("Memory file exists", True)

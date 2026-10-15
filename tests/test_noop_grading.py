@@ -134,6 +134,18 @@ def new_workspace(task_dir, workspace):
         (workspace / name).mkdir(exist_ok=True)
 
 
+def rewrite_empty_memory(workspace):
+    """Leave memory.json as the memory server does after a call that adds nothing.
+
+    For a .json path its saveGraph keeps the file's other keys and writes the
+    graph back pretty-printed, so the file changes but still holds no memory.
+    """
+    path = workspace / "memory" / "memory.json"
+    existing = json.loads(path.read_text() or "{}")
+    rest = {key: value for key, value in existing.items() if key not in ("entities", "relations")}
+    path.write_text(json.dumps({**rest, "entities": [], "relations": []}, indent=2) + "\n")
+
+
 def grade(task_dir, workspace, connect=None):
     res_log = workspace / "eval_result.json"
     if res_log.exists():
@@ -174,6 +186,11 @@ class MemoryOnlyGraderTests(unittest.TestCase):
             untouched = grade(task_dir, workspace)
             self.assertEqual(untouched.passed, set(), untouched.output)
             self.assertEqual(untouched.reward, {"binary": 0.0, "partial": 0.0}, untouched.output)
+
+            rewrite_empty_memory(workspace)
+            rewritten = grade(task_dir, workspace)
+            self.assertEqual(rewritten.passed, set(), rewritten.output)
+            self.assertEqual(rewritten.reward, {"binary": 0.0, "partial": 0.0}, rewritten.output)
 
             shutil.copy(task_dir / "groundtruth_workspace" / "memory" / "memory.json", workspace / "memory" / "memory.json")
             written = grade(task_dir, workspace)
@@ -958,6 +975,12 @@ class NoopSeededGradingTests(unittest.TestCase):
             untouched = ep.grade()
             self.assertEqual(untouched.reward, {"binary": 0.0, "partial": 0.0}, untouched.output)
             self.assertEqual(untouched.passed, set(), untouched.output)
+            if (ep.workspace / "memory" / "memory.json").exists():
+                # A memory call that adds nothing rewrites the shipped file but records nothing.
+                rewrite_empty_memory(ep.workspace)
+                rewritten = ep.grade()
+                self.assertEqual(rewritten.reward, {"binary": 0.0, "partial": 0.0}, rewritten.output)
+                self.assertEqual(rewritten.passed, set(), rewritten.output)
             if deliverables is None:
                 return
             deliverables(ep)
