@@ -4,7 +4,9 @@ Preprocess for 12306-canvas-fieldtrip-gcal-word-email.
 Injects:
 - 1 gcal event: "Regular Class - Cultural Heritage" 2026-03-12 09:00-11:00
 - 1 email from students@university.edu requesting field trip info
-- Clears email, gcal tables (Canvas is read-only)
+- Clears email, gcal tables (Canvas is read-only apart from the next item)
+- Removes the seed's leftover "Field Trip Notice - Qufu Visit March 12-15"
+  announcement, which is the announcement this task asks the agent to create
 """
 import argparse
 import json
@@ -38,6 +40,20 @@ def clear_tables(conn):
             pass
     conn.commit()
     print("[preprocess] Cleared email and gcal tables.")
+
+
+def remove_seeded_announcement(conn):
+    # The template database already holds the finished field trip announcement
+    # (train G235, CNY 1106). Left in place it leaks the expected answers and
+    # grades as the agent's announcement.
+    with conn.cursor() as cur:
+        cur.execute("""
+            DELETE FROM canvas.announcements
+            WHERE title ILIKE '%qufu%' OR message ILIKE '%qufu%' OR message ILIKE '%g235%'
+        """)
+        removed = cur.rowcount
+    conn.commit()
+    print(f"[preprocess] Removed {removed} seeded field trip announcement(s).")
 
 
 def ensure_email_folder(conn):
@@ -106,6 +122,7 @@ def main():
     conn = psycopg2.connect(**DB_CONFIG)
     try:
         clear_tables(conn)
+        remove_seeded_announcement(conn)
         inject_gcal(conn)
         folder_id = ensure_email_folder(conn)
         inject_email(conn, folder_id)
