@@ -298,14 +298,22 @@ def check_memory(agent_workspace):
     if not os.path.isfile(memory_path):
         record("Memory file exists", False, f"Not found: {memory_path}")
         return False
-    record("Memory file exists", True)
 
     try:
         with open(memory_path, "r") as f:
             data = json.load(f)
     except Exception as e:
+        record("Memory file exists", True)
         record("Memory file is valid JSON", False, str(e))
         return False
+
+    # The initial workspace already ships {"notes": []}, so the file only
+    # counts once the agent has written to it.
+    if data == {"notes": []}:
+        record("Memory file exists", False, "memory.json is still the empty initial file")
+        return False
+
+    record("Memory file exists", True)
     record("Memory file is valid JSON", True)
 
     content = json.dumps(data).lower()

@@ -210,19 +210,19 @@ def check_memory(agent_workspace):
     print("\n=== Checking Memory ===")
 
     memory_path = os.path.join(agent_workspace, "memory", "memory.json")
-    if not os.path.isfile(memory_path):
-        check("memory.json exists", False, f"Not found: {memory_path}")
-        return
+    content = ""
+    if os.path.isfile(memory_path):
+        with open(memory_path, "r") as f:
+            content = f.read().strip()
 
-    check("memory.json exists", True)
-
-    with open(memory_path, "r") as f:
-        content = f.read().strip()
-
+    # The initial workspace already ships an empty memory.json, so the file
+    # only counts once the agent has written to it.
     if not content or content in ("{}", '{"entities": [], "relations": []}'):
+        check("memory.json exists", False, f"Missing or still the empty initial file: {memory_path}")
         check("Memory has content", False, "memory.json is empty or unchanged")
         return
 
+    check("memory.json exists", True)
     check("Memory has content", True)
 
     try:
