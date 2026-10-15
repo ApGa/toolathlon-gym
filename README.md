@@ -124,7 +124,9 @@ docker run --rm \
   ghcr.io/apga/openreward-toolathlon-gym:latest
 ```
 
-Partial mode reads the grader result log or stdout summaries such as `total_passed/total_checks`, `passed/failed`, or `Overall: N/M checks passed`. If a grader only reports pass/fail, the server falls back to the binary reward for that task. Each evaluation gives the grader a new result-log path outside the agent's workspace, so an `eval_result.json` the agent writes is never read.
+Partial mode reads the grader result log or a stdout summary such as `total_passed/total_checks`, `passed/failed`, or `Overall: N/M checks passed`. When a grader prints more than one summary line, the server takes the last one it writes, so text it echoes from the agent's own work is not read as the score. If a grader only reports pass/fail, the server falls back to the binary reward for that task.
+
+The grader is run from the image's read-only task tree, never the session's writable copy, so the agent cannot rewrite the script it is scored by. The session supplies only its workspace, its database and a fresh result-log directory created for each grading outside the workspace, so an `eval_result.json` the agent writes is never read. While the grader runs, the session's own processes are paused, so a background job the agent left running cannot write the result file or anything the grader reads. A process that detaches and replaces its environment is the one case the server cannot attribute to the session; the read-only grader and the per-grading result path still hold.
 
 ## Data
 
