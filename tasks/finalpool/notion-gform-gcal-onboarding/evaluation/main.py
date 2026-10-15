@@ -283,10 +283,14 @@ def check_notion():
             checklist_page_id = page_id
             break
 
-    record("Onboarding checklist page exists", checklist_page_id is not None,
-           f"No page with 'onboarding' and 'checklist' found among {len(pages)} pages")
-
+    # The checklist page is input data created by preprocess, so finding it
+    # earns nothing; only the agent's update to it is graded.
     if not checklist_page_id:
+        detail = f"No page with 'onboarding' and 'checklist' found among {len(pages)} pages"
+        record("Notion blocks contain 'march 2026'", False, detail)
+        record("Notion blocks mention new hire names (>=2)", False, detail)
+        cur.close()
+        conn.close()
         return False
 
     # Check blocks for "March 2026" content

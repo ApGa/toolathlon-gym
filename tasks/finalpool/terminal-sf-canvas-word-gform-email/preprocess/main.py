@@ -1,5 +1,9 @@
 """Preprocess for terminal-sf-canvas-word-gform-email.
-Clears gform and email. Injects survey form with 5 questions and 15 responses. Injects noise emails."""
+Clears gform and email. Injects survey form with 5 questions and 15 responses. Injects noise emails.
+
+The injected survey only carries the responses for the analysis. It has the
+fixed id SEEDED_SURVEY_FORM_ID so the grader can tell it apart from the
+"Training Feedback Survey" form the agent is asked to create."""
 import argparse
 import json
 import os
@@ -10,6 +14,9 @@ import psycopg2
 DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432,
           dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
           user="eigent", password="camel")
+
+# Shared with evaluation/main.py.
+SEEDED_SURVEY_FORM_ID = "seeded-training-feedback-survey"
 
 
 def main():
@@ -73,7 +80,7 @@ def main():
         print("[preprocess] Injected 5 noise emails.")
 
         # Inject Training Feedback Survey form with 5 questions and 15 responses
-        form_id = str(uuid.uuid4())
+        form_id = SEEDED_SURVEY_FORM_ID
         cur.execute(
             "INSERT INTO gform.forms (id, title, document_title, description) "
             "VALUES (%s, %s, %s, %s)",

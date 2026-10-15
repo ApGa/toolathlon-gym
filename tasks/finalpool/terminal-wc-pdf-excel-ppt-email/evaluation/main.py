@@ -19,6 +19,8 @@ DB_CONFIG = {
     "user": "eigent", "password": "camel",
 }
 
+SENT_FOLDER = "folder_id IN (SELECT id FROM email.folders WHERE LOWER(name) LIKE '%%sent%%')"
+
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
@@ -236,12 +238,13 @@ def check_emails():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     try:
+        # Only sent mail counts: preprocess injects an inbound invoice to finance@.
         # Check email to operations
-        cur.execute("""
+        cur.execute(f"""
             SELECT subject, to_addr, body_text FROM email.messages
-            WHERE to_addr::text ILIKE '%%operations%%'
+            WHERE {SENT_FOLDER} AND (to_addr::text ILIKE '%%operations%%'
                OR subject ILIKE '%%recall%%alert%%'
-               OR subject ILIKE '%%recall%%impact%%'
+               OR subject ILIKE '%%recall%%impact%%')
         """)
         ops_emails = cur.fetchall()
         check("Email to operations sent", len(ops_emails) >= 1, "No matching email found")
@@ -252,11 +255,11 @@ def check_emails():
                   "recall" in subj or "recall" in body)
 
         # Check email to finance
-        cur.execute("""
+        cur.execute(f"""
             SELECT subject, to_addr, body_text FROM email.messages
-            WHERE to_addr::text ILIKE '%%finance%%'
+            WHERE {SENT_FOLDER} AND (to_addr::text ILIKE '%%finance%%'
                OR subject ILIKE '%%financial%%impact%%'
-               OR subject ILIKE '%%recall%%financial%%'
+               OR subject ILIKE '%%recall%%financial%%')
         """)
         fin_emails = cur.fetchall()
         check("Email to finance sent", len(fin_emails) >= 1, "No matching email found")
@@ -266,11 +269,11 @@ def check_emails():
                   "revenue" in combined or "financial" in combined or "impact" in combined)
 
         # Check email to legal
-        cur.execute("""
+        cur.execute(f"""
             SELECT subject, to_addr, body_text FROM email.messages
-            WHERE to_addr::text ILIKE '%%legal%%'
+            WHERE {SENT_FOLDER} AND (to_addr::text ILIKE '%%legal%%'
                OR subject ILIKE '%%customer%%communication%%'
-               OR subject ILIKE '%%recall%%customer%%'
+               OR subject ILIKE '%%recall%%customer%%')
         """)
         legal_emails = cur.fetchall()
         check("Email to legal sent", len(legal_emails) >= 1, "No matching email found")

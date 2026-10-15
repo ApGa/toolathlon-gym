@@ -162,11 +162,12 @@ def check_notion():
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
 
+        # "health" would also match the "Health Coach Knowledge Base" parent
+        # page that preprocess creates.
         cur.execute("""
             SELECT id, properties FROM notion.pages
             WHERE properties::text ILIKE '%%wellness%%'
                OR properties::text ILIKE '%%dashboard%%'
-               OR properties::text ILIKE '%%health%%'
         """)
         pages = cur.fetchall()
 

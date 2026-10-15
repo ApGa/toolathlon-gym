@@ -25,6 +25,9 @@ DB_CONFIG = {
     "password": "camel",
 }
 
+# Calendar events injected by preprocess/main.py (input data, not agent work).
+PREPROCESS_EVENT_SUMMARIES = ("Monthly All-Hands Meeting", "Shanghai Partner Strategy Meeting")
+
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
@@ -200,25 +203,19 @@ def check_gcal():
 
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
-    cur.execute("""
-        SELECT COUNT(*) FROM gcal.events
-        WHERE start_datetime::date = '2026-03-10'
-    """)
-    total_count = cur.fetchone()[0]
-
-    # Preprocess injects 2 events, agent should add at least 2 more (net >= 4, or if preprocess cleared first, >= 2)
-    # We check that at least 2 events exist total and at least some are agent-added
+    # Preprocess injects 2 events on this day; only events the agent adds count.
     cur.execute("""
         SELECT summary, start_datetime FROM gcal.events
         WHERE start_datetime::date = '2026-03-10'
+          AND COALESCE(summary, '') NOT IN %s
         ORDER BY start_datetime
-    """)
+    """, (PREPROCESS_EVENT_SUMMARIES,))
     events = cur.fetchall()
     cur.close()
     conn.close()
 
-    record("GCal has >= 2 events on 2026-03-10", total_count >= 2,
-           f"Found {total_count} events")
+    record("GCal has >= 2 agent-created events on 2026-03-10", len(events) >= 2,
+           f"Found {len(events)} events besides the preprocess events")
 
     # Check that at least one agent-created event exists (departure or dinner or check-in)
     event_summaries = [str(e[0]).lower() for e in events]

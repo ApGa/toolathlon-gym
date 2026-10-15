@@ -1,5 +1,9 @@
 """Preprocess for terminal-wc-howtocook-gform-excel-notion.
-Clears gform, notion. Injects survey form with questions and sample responses. Injects noise data."""
+Clears gform, notion. Injects survey form with questions and sample responses. Injects noise data.
+
+The injected survey only carries the responses for survey_analyzer.py. It has
+the fixed id SEEDED_SURVEY_FORM_ID so the grader can tell it apart from the
+"Meal Kit Interest Survey" form the agent is asked to create."""
 import argparse
 import json
 import os
@@ -13,6 +17,9 @@ DB_CONFIG = {
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel",
 }
+
+# Shared with evaluation/main.py.
+SEEDED_SURVEY_FORM_ID = "seeded-meal-kit-interest-survey"
 
 
 def main():
@@ -38,7 +45,7 @@ def main():
         print("[preprocess] Cleared notion data.")
 
         # ---- Inject the survey form with questions and responses ----
-        form_id = str(uuid.uuid4())
+        form_id = SEEDED_SURVEY_FORM_ID
         cur.execute("""
             INSERT INTO gform.forms (id, title, document_title, description, created_at, updated_at)
             VALUES (%s, %s, %s, %s, NOW(), NOW())

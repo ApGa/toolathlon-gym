@@ -20,6 +20,10 @@ DB_CONFIG = {
     "user": "eigent", "password": "camel",
 }
 
+# Id of the survey preprocess/main.py injects to hold the sample responses. It
+# is input data, not the form the agent is asked to create.
+SEEDED_SURVEY_FORM_ID = "seeded-meal-kit-interest-survey"
+
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
@@ -146,7 +150,7 @@ def check_gform():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     try:
-        cur.execute("SELECT id, title FROM gform.forms")
+        cur.execute("SELECT id, title FROM gform.forms WHERE id <> %s", (SEEDED_SURVEY_FORM_ID,))
         forms = cur.fetchall()
         meal_form = None
         for form_id, title in forms:

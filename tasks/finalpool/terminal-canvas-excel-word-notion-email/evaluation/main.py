@@ -187,13 +187,15 @@ def check_email():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     try:
+        # Only sent mail counts: preprocess injects inbound newsletters to advisor@.
         cur.execute("""
             SELECT id, subject, to_addr, body_text
             FROM email.messages
-            WHERE to_addr::text ILIKE '%%academic_advisors%%'
-               OR to_addr::text ILIKE '%%advisor%%'
-               OR subject ILIKE '%%retention%%risk%%'
-               OR subject ILIKE '%%risk%%analysis%%'
+            WHERE folder_id IN (SELECT id FROM email.folders WHERE LOWER(name) LIKE '%%sent%%')
+              AND (to_addr::text ILIKE '%%academic_advisors%%'
+                   OR to_addr::text ILIKE '%%advisor%%'
+                   OR subject ILIKE '%%retention%%risk%%'
+                   OR subject ILIKE '%%risk%%analysis%%')
         """)
         emails = cur.fetchall()
 

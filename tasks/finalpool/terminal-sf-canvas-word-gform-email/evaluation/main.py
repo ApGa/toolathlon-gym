@@ -18,6 +18,10 @@ DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432,
           dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
           user="eigent", password="camel")
 
+# Id of the survey preprocess/main.py injects to hold the 15 responses. It is
+# input data, not the form the agent is asked to create.
+SEEDED_SURVEY_FORM_ID = "seeded-training-feedback-survey"
+
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
@@ -156,7 +160,7 @@ def check_gform():
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
 
-    cur.execute("SELECT id, title FROM gform.forms")
+    cur.execute("SELECT id, title FROM gform.forms WHERE id <> %s", (SEEDED_SURVEY_FORM_ID,))
     forms = cur.fetchall()
 
     form_id = None
@@ -187,12 +191,6 @@ def check_gform():
             check("Q5 about format",
                   any("format" in t for t in q_titles),
                   f"Q titles: {q_titles}")
-
-        # Check responses exist
-        cur.execute("SELECT COUNT(*) FROM gform.responses WHERE form_id = %s", (form_id,))
-        resp_count = cur.fetchone()[0]
-        check("Form has responses", resp_count >= 15,
-              f"Found {resp_count} responses")
 
     cur.close()
     conn.close()
