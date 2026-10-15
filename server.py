@@ -22,6 +22,7 @@ import os
 import random
 import re
 import shutil
+import stat
 import tempfile
 from collections import defaultdict
 from datetime import datetime
@@ -60,6 +61,8 @@ MCP_OUTPUT_MAX_CHARS = int(os.getenv("OPENREWARD_MCP_OUTPUT_MAX_CHARS", "50000")
 MCP_OUTPUT_MAX_JSON_STRING_CHARS = int(os.getenv("OPENREWARD_MCP_OUTPUT_MAX_JSON_STRING_CHARS", "2000"))
 MCP_SUBPROCESS_STREAM_LIMIT = int(os.getenv("OPENREWARD_MCP_SUBPROCESS_STREAM_LIMIT", str(16 * 1024 * 1024)))
 REWARD_MODE_ENV = "OPENREWARD_REWARD_MODE"
+GRADER_RESULT_FILE = "eval_result.json"
+GRADER_RESULT_MAX_BYTES = 16 * 1024 * 1024
 TOOL_ROUTING_SCHEMA_KEY = "x-openhands-tool-routing"
 TOOL_ERROR_META_KEY = "openhands.dev/tool-error"
 
@@ -284,14 +287,41 @@ def _score_from_eval_output(output: str) -> float | None:
     return None
 
 
+def _load_grader_result(res_log: Path) -> Any:
+    """Parse the result file the grader wrote, or return None.
+
+    Only a regular file is read, never a symlink, FIFO or device, so nothing
+    placed at the path can redirect the read or block the server.
+    """
+    try:
+        fd = os.open(res_log, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > GRADER_RESULT_MAX_BYTES:
+                return None
+            data = stream.read(GRADER_RESULT_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > GRADER_RESULT_MAX_BYTES:
+        return None
+    try:
+        return json.loads(data)
+    except (ValueError, RecursionError):
+        return None
+
+
 def _partial_reward_from_grader(res_log: Path, output: str) -> float | None:
-    if res_log.exists():
-        try:
-            score = _score_from_result_json(json.loads(res_log.read_text()))
-            if score is not None:
-                return score
-        except (OSError, json.JSONDecodeError):
-            pass
+    """The grader's fraction of passed checks: its result file, else its output.
+
+    ``res_log`` must not exist before the grader starts: claim_done puts it in
+    a new directory outside the agent's workspace.
+    """
+    score = _score_from_result_json(_load_grader_result(res_log))
+    if score is not None:
+        return score
     return _score_from_eval_output(output)
 
 
@@ -1028,10 +1058,17 @@ class ToolathlonGym(Environment):
                 finished=True,
             )
 
-        res_log = self.workspace_dir / "eval_result.json"
         groundtruth = self.task_dir / "groundtruth_workspace"
+        # Partial mode takes the score from the grader's result file. The
+        # workspace belongs to the agent, so each evaluation gives the grader a
+        # new directory outside it: the reward can only come from a file
+        # written while this grader runs, never from an eval_result.json the
+        # agent left behind.
+        result_dir = None
 
         try:
+            result_dir = Path(tempfile.mkdtemp(prefix="grader-result-", dir=self._session_dir))
+            res_log = result_dir / GRADER_RESULT_FILE
             proc = await run_task_process(
                 "python3", str(eval_script),
                 "--agent_workspace", str(self.workspace_dir),
@@ -1070,6 +1107,9 @@ class ToolathlonGym(Environment):
                 reward=0.0,
                 finished=True,
             )
+        finally:
+            if result_dir is not None:
+                shutil.rmtree(result_dir, ignore_errors=True)
 
     @tool
     async def python_execute(self, params: PythonExecuteInput) -> ToolOutput:

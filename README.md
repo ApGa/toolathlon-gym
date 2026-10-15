@@ -124,7 +124,7 @@ docker run --rm \
   ghcr.io/apga/openreward-toolathlon-gym:latest
 ```
 
-Partial mode reads the grader result log or stdout summaries such as `total_passed/total_checks`, `passed/failed`, or `Overall: N/M checks passed`. If a grader only reports pass/fail, the server falls back to the binary reward for that task.
+Partial mode reads the grader result log or stdout summaries such as `total_passed/total_checks`, `passed/failed`, or `Overall: N/M checks passed`. If a grader only reports pass/fail, the server falls back to the binary reward for that task. Each evaluation gives the grader a new result-log path outside the agent's workspace, so an `eval_result.json` the agent writes is never read.
 
 ## Data
 
