@@ -90,13 +90,15 @@ def check_ppt_file(agent_workspace):
         return False, "Coupon_Analysis_Presentation.pptx not found"
     try:
         from pptx import Presentation
+    except ImportError:
+        return False, "python-pptx is not installed, so Coupon_Analysis_Presentation.pptx cannot be checked"
+    try:
         prs = Presentation(ppt_path)
-        if len(prs.slides) < 7:
-            return False, f"PPT has only {len(prs.slides)} slides, expected >= 7 (1 title + coupons + 1 summary)"
-        return True, ""
     except Exception as e:
-        # If pptx not importable, just check file exists
-        return True, ""
+        return False, f"Coupon_Analysis_Presentation.pptx is not a readable presentation: {e}"
+    if len(prs.slides) < 7:
+        return False, f"PPT has only {len(prs.slides)} slides, expected >= 7 (1 title + coupons + 1 summary)"
+    return True, ""
 
 
 def main():

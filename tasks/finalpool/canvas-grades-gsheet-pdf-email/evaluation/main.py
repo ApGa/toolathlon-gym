@@ -1,10 +1,7 @@
 """Evaluation script for canvas-grades-gsheet-pdf-email."""
 import os
 import argparse, json, os, sys
-import openpyxl
-
-def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
-    return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
+from grader_helpers import google_sheet_records, close, number, text
 
 
 DB_CONFIG = {
@@ -26,75 +23,37 @@ def check(name, condition, detail=""):
         detail_str = str(detail)[:200] if detail else ""
         print(f"  [FAIL] {name}: {detail_str}")
 
-def safe_float(val, default=None):
-    try:
-        if val is None: return default
-        return float(str(val).replace(",", "").replace("%", "").replace("$", "").strip())
-    except (ValueError, TypeError):
-        return default
 
 def get_conn():
     import psycopg2
     return psycopg2.connect(**DB_CONFIG)
 
+def check_submitted_sheet(cur):
+    rows = google_sheet_records(cur, "Department Grade Dashboard", "Grade_Distribution",
+        ("course_name", "a_count", "b_count", "c_count", "d_count", "f_count", "total_students", "pass_rate_pct", "course_avg"), check)
+    summary = google_sheet_records(cur, "Department Grade Dashboard", "Department_Summary", ("metric", "value"), check)
+    cur.execute("SELECT name FROM canvas.courses")
+    names = {text(r[0]) for r in cur.fetchall()}
+    check("Grade distribution covers all courses", len(rows) == len(names)
+          and {text(r["course_name"]) for r in rows} == names)
+    for row in rows:
+        counts = [number(row[k]) for k in ("a_count", "b_count", "c_count", "d_count", "f_count")]
+        total, avg = number(row["total_students"]), number(row["course_avg"])
+        valid = all(c is not None and c >= 0 and c.is_integer() for c in counts)
+        valid = valid and total is not None and total > 0 and close(sum(counts), total, 0)
+        valid = valid and close(row["pass_rate_pct"], 100 * sum(counts[:3]) / total, .06)
+        valid = valid and avg is not None and 0 <= avg <= 100
+        check(f"Grade distribution arithmetic: {row['course_name']}", valid)
+    metrics = {text(r["metric"]): r["value"] for r in summary}
+    required = {"total_courses", "total_students", "overall_pass_rate", "overall_avg_grade", "highest_avg_course", "lowest_avg_course"}
+    check("Department summary contains all required metrics", required.issubset(metrics))
+    check("Department course count", close(metrics.get("total_courses"), len(names), 0))
+
+
 def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_file):
     global PASS_COUNT, FAIL_COUNT
     PASS_COUNT = 0
     FAIL_COUNT = 0
-
-    # Check Grade_Dashboard_Reference.xlsx
-    excel_path = os.path.join(agent_workspace, "Grade_Dashboard_Reference.xlsx")
-    check("Grade_Dashboard_Reference.xlsx exists", os.path.exists(excel_path))
-    if os.path.exists(excel_path):
-        wb = openpyxl.load_workbook(excel_path)
-        gt_path = os.path.join(groundtruth_workspace, "Grade_Dashboard_Reference.xlsx")
-        gt_wb = openpyxl.load_workbook(gt_path) if os.path.exists(gt_path) else None
-
-        if gt_wb:
-            for sheet_name in gt_wb.sheetnames:
-                check(f"{sheet_name} sheet exists", sheet_name in wb.sheetnames)
-                if sheet_name in wb.sheetnames:
-                    ws = wb[sheet_name]
-                    gt_ws = gt_wb[sheet_name]
-                    # Check headers
-                    gt_headers = [str(c.value).strip().lower() if c.value else "" for c in gt_ws[1]]
-                    headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-                    for h in gt_headers:
-                        if h:
-                            check(f"{sheet_name} has {h} column", h in headers, f"headers: {headers[:10]}")
-                    # Check row count
-                    gt_rows = list(gt_ws.iter_rows(min_row=2, values_only=True))
-                    data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-                    min_rows = max(1, len(gt_rows) - 2)
-                    check(f"{sheet_name} has >= {min_rows} data rows", len(data_rows) >= min_rows, f"got {len(data_rows)}")
-
-                    # Cell value comparison against groundtruth
-                    header_map = {h: i for i, h in enumerate(headers)}
-                    gt_header_map = {h: i for i, h in enumerate(gt_headers)}
-                    for ri in range(min(3, len(gt_rows), len(data_rows))):
-                        gt_row = gt_rows[ri]
-                        agent_row = data_rows[ri]
-                        for ci, gt_h in enumerate(gt_headers):
-                            if not gt_h or ci >= len(gt_row):
-                                continue
-                            gv = gt_row[ci]
-                            agent_ci = header_map.get(gt_h)
-                            if agent_ci is None or agent_ci >= len(agent_row):
-                                continue
-                            av = agent_row[agent_ci]
-                            gf = safe_float(gv)
-                            af = safe_float(av)
-                            if gf is not None and af is not None:
-                                tol = max(0.5, abs(gf) * 0.15)
-                                check(f"{sheet_name} R{ri+2} {gt_h} ~{gf:.1f}",
-                                      abs(gf - af) <= tol, f"got {af}")
-                            elif gv is not None and av is not None:
-                                gs = str(gv).strip().lower()
-                                avs = str(av).strip().lower()
-                                if gs:
-                                    check(f"{sheet_name} R{ri+2} {gt_h} text",
-                                          gs == avs or gs in avs or avs in gs,
-                                          f"expected {gs[:50]}, got {avs[:50]}")
 
     # Check Python script exists (terminal usage)
     py_files = [f for f in os.listdir(agent_workspace) if f.endswith(".py")]
@@ -104,6 +63,7 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
     try:
         conn = get_conn()
         cur = conn.cursor()
+        check_submitted_sheet(cur)
         cur.execute("SELECT subject, to_addr FROM email.messages WHERE folder_id = (SELECT id FROM email.folders WHERE name = 'Sent' LIMIT 1) AND subject ILIKE '%grade%'")
         email_row = cur.fetchone()
         check("Email with correct subject sent", email_row is not None, "no matching email found")

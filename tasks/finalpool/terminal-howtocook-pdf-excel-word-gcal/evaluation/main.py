@@ -245,8 +245,11 @@ def check_reverse_validation(workspace):
                    OR EXTRACT(DAY FROM start_datetime) > 13)
         """)
         bad_events = cur.fetchone()[0]
-        check("No food festival prep events outside March 9-13", bad_events == 0,
-              f"Found {bad_events} events outside range")
+        # Without food festival prep events there is nothing to validate.
+        cur.execute("SELECT COUNT(*) FROM gcal.events WHERE LOWER(summary) LIKE '%%food festival prep%%'")
+        event_count = cur.fetchone()[0]
+        check("No food festival prep events outside March 9-13", event_count > 0 and bad_events == 0,
+              f"Found {bad_events} events outside range" if event_count else "No food festival prep events")
         cur.close()
         conn.close()
     except Exception:

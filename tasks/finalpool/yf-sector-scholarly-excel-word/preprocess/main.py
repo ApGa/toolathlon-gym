@@ -15,15 +15,6 @@ def get_conn():
     import psycopg2
     return psycopg2.connect(**DB_CONFIG)
 
-def clear_writable_schemas():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM scholarly.scholar_papers")
-    cur.execute("DELETE FROM scholarly.arxiv_papers")
-    conn.commit()
-    cur.close()
-    conn.close()
-
 def inject_data(launch_time):
     conn = get_conn()
     cur = conn.cursor()
@@ -55,7 +46,7 @@ def main():
     parser.add_argument("--launch_time", required=False, default="2026-03-07 10:00:00")
     args = parser.parse_args()
 
-    clear_writable_schemas()
+    # Keep the baseline research corpus available alongside task-specific papers.
     inject_data(args.launch_time)
 
 if __name__ == "__main__":

@@ -12,6 +12,41 @@ from mcp.server.models import InitializationOptions
 
 server = Server("cli-mcp-server")
 
+SHELL_OPERATORS = ("&&", "||", ">>", "<<", "|", ">", "<", ";")
+
+
+def _split_shell_operators(command_string: str, operators=SHELL_OPERATORS) -> List[str]:
+    """Split existing supported operators outside quotes and backslash escapes.
+
+    Keep original spelling/quoting so validation and execution see the same
+    arguments. This is not a shell expansion engine; shlex still validates
+    quoting in each resulting command segment.
+    """
+    operators = sorted(operators, key=len, reverse=True)
+    parts = []
+    quote = None
+    start = index = 0
+    while index < len(command_string):
+        char = command_string[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+        else:
+            operator = next((op for op in operators if command_string.startswith(op, index)), None)
+            if operator is not None:
+                parts.extend([command_string[start:index].strip(), operator])
+                index += len(operator)
+                start = index
+                continue
+        index += 1
+    parts.append(command_string[start:].strip())
+    return [part for part in parts if part]
+
 
 class CommandError(Exception):
     """Base exception for command-related errors"""
@@ -128,27 +163,20 @@ class CommandExecutor:
             CommandSecurityError: If any part of the command fails security validation.
         """
 
-        # Define shell operators
-        shell_operators = ["&&", "||", "|", ">", ">>", "<", "<<", ";"]
+        parts = _split_shell_operators(command_string)
+        operators = [part for part in parts if part in SHELL_OPERATORS]
 
-        # Check if command contains shell operators
-        contains_shell_operator = any(
-            operator in command_string for operator in shell_operators
-        )
-
-        if contains_shell_operator:
+        if operators:
             # Check if shell operators are allowed
             if not self.security_config.allow_shell_operators:
                 # If shell operators are not allowed, raise an error
-                for operator in shell_operators:
-                    if operator in command_string:
-                        raise CommandSecurityError(
-                            f"Shell operator '{operator}' is not supported. Set ALLOW_SHELL_OPERATORS=true to enable."
-                        )
+                raise CommandSecurityError(
+                    f"Shell operator '{operators[0]}' is not supported. Set ALLOW_SHELL_OPERATORS=true to enable."
+                )
 
             # Split the command by shell operators and validate each part
             return self._validate_command_with_operators(
-                command_string, shell_operators
+                command_string, SHELL_OPERATORS
             )
 
         # Process single command without shell operators
@@ -273,18 +301,7 @@ class CommandExecutor:
         """
         # Define redirection operators that take filenames as arguments
         redirection_operators = [">", ">>", "<", "<<"]
-        command_separators = ["&&", "||", "|", ";"]
-        
-        # Create a regex pattern to split by any of the shell operators
-        # We need to escape special regex characters in the operators
-        escaped_operators = [re.escape(op) for op in shell_operators]
-        pattern = "|".join(escaped_operators)
-
-        # Split the command string by shell operators, keeping the operators
-        parts = re.split(f"({pattern})", command_string)
-
-        # Filter out empty parts and whitespace-only parts
-        parts = [part.strip() for part in parts if part.strip()]
+        parts = _split_shell_operators(command_string, shell_operators)
 
         # Parse commands with context awareness
         i = 0
@@ -367,6 +384,16 @@ class CommandExecutor:
 
             # Prepare environment variables for proxy support
             env = os.environ.copy()
+            task_path = env.pop("TOOLATHLON_TASK_PATH", None)
+            if task_path is not None:
+                # Keep this MCP server in its own venv, but run the agent's
+                # commands with the task environment captured before uv boot.
+                env["PATH"] = task_path
+                task_venv = env.pop("TOOLATHLON_TASK_VIRTUAL_ENV", "")
+                if task_venv:
+                    env["VIRTUAL_ENV"] = task_venv
+                else:
+                    env.pop("VIRTUAL_ENV", None)
             if self.security_config.proxy_enabled and self.security_config.proxy_url:
                 env.update({
                     'HTTP_PROXY': self.security_config.proxy_url,
@@ -376,16 +403,14 @@ class CommandExecutor:
                 })
 
             # Check if this is a command with shell operators
-            shell_operators = ["&&", "||", "|", ">", ">>", "<", "<<", ";"]
-            use_shell = any(operator in command_string for operator in shell_operators)
+            operators = [part for part in _split_shell_operators(command_string) if part in SHELL_OPERATORS]
+            use_shell = bool(operators)
 
             # Double-check that shell operators are allowed if they are present
             if use_shell and not self.security_config.allow_shell_operators:
-                for operator in shell_operators:
-                    if operator in command_string:
-                        raise CommandSecurityError(
-                            f"Shell operator '{operator}' is not supported. Set ALLOW_SHELL_OPERATORS=true to enable."
-                        )
+                raise CommandSecurityError(
+                    f"Shell operator '{operators[0]}' is not supported. Set ALLOW_SHELL_OPERATORS=true to enable."
+                )
 
             if use_shell:
                 # For commands with shell operators, execute with shell=True

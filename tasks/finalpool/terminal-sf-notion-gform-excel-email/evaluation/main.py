@@ -235,7 +235,8 @@ def check_reverse_validation(workspace):
             WHERE properties::text ILIKE '%%engagement%%' AND properties::text ILIKE '%%HR%%Dashboard%%'
         """)
         count = cur.fetchone()[0]
-        record("No duplicate Notion HR Dashboard pages", count <= 1,
+        # Exactly one: zero means the dashboard page was never created.
+        record("No duplicate Notion HR Dashboard pages", count == 1,
                f"Found {count} matching pages")
         cur.close()
         conn.close()

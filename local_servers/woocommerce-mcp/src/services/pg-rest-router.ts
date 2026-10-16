@@ -39,6 +39,7 @@ function stripLeadingSlash(url: string): string {
 
 export class PgRestRouter {
   private pool: pg.Pool;
+  private columnCache = new Map<string, Set<string>>();
 
   constructor() {
     this.pool = new Pool({
@@ -111,7 +112,7 @@ export class PgRestRouter {
         );
         return makeResponse(res.rows[0] || null);
       }
-      const { query, values } = this.buildListQuery(nested.table, params, nested.parentKey, parentId);
+      const { query, values } = await this.buildListQuery(nested.table, params, nested.parentKey, parentId);
       const res = await this.pool.query(query, values);
       return makeResponse(res.rows);
     }
@@ -131,7 +132,7 @@ export class PgRestRouter {
         return makeResponse(res.rows[0] || null);
       }
 
-      const { query, values } = this.buildListQuery(resource.table, params);
+      const { query, values } = await this.buildListQuery(resource.table, params);
       const res = await this.pool.query(query, values);
       return makeResponse(res.rows);
     }
@@ -298,13 +299,14 @@ export class PgRestRouter {
     return null;
   }
 
-  private buildListQuery(table: string, params: any, parentKey?: string, parentId?: string): {query: string, values: any[]} {
+  private async buildListQuery(table: string, params: any, parentKey?: string, parentId?: string): Promise<{query: string, values: any[]}> {
     const conditions: string[] = [];
     const values: any[] = [];
     let paramIndex = 1;
+    const columns = await this.getTableColumns(table);
 
     if (parentKey && parentId) {
-      conditions.push(`${parentKey} = $${paramIndex}`);
+      conditions.push(`${this.quoteIdent(parentKey)} = $${paramIndex}`);
       values.push(parentId);
       paramIndex++;
     }
@@ -314,7 +316,7 @@ export class PgRestRouter {
     for (const field of filterFields) {
       // Skip undefined and empty-string values so that an unset optional
       // parameter (passed as "") does not produce a spurious WHERE clause.
-      if (params[field] !== undefined && params[field] !== null && params[field] !== '') {
+      if (columns.has(field) && params[field] !== undefined && params[field] !== null && params[field] !== '') {
         conditions.push(`${this.quoteIdent(field)} = $${paramIndex}`);
         values.push(params[field]);
         paramIndex++;
@@ -322,33 +324,34 @@ export class PgRestRouter {
     }
 
     // Search
-    if (params.search) {
-      conditions.push(`(name ILIKE $${paramIndex} OR slug ILIKE $${paramIndex})`);
+    if (params.search && (columns.has('name') || columns.has('slug'))) {
+      const searchCols = ['name', 'slug'].filter(col => columns.has(col));
+      conditions.push(`(${searchCols.map(col => `${this.quoteIdent(col)} ILIKE $${paramIndex}`).join(' OR ')})`);
       values.push(`%${params.search}%`);
       paramIndex++;
     }
 
     // Date filters
-    if (params.after) {
+    if (columns.has('date_created') && params.after) {
       conditions.push(`date_created >= $${paramIndex}`);
       values.push(params.after);
       paramIndex++;
     }
-    if (params.before) {
+    if (columns.has('date_created') && params.before) {
       conditions.push(`date_created <= $${paramIndex}`);
       values.push(params.before);
       paramIndex++;
     }
 
     // Category filter (JSONB)
-    if (params.category) {
+    if (columns.has('categories') && params.category) {
       conditions.push(`categories @> $${paramIndex}::jsonb`);
       values.push(JSON.stringify([{ id: parseInt(params.category) }]));
       paramIndex++;
     }
 
     // Tag filter (JSONB)
-    if (params.tag) {
+    if (columns.has('tags') && params.tag) {
       conditions.push(`tags @> $${paramIndex}::jsonb`);
       values.push(JSON.stringify([{ id: parseInt(params.tag) }]));
       paramIndex++;
@@ -357,9 +360,12 @@ export class PgRestRouter {
     const whereClause = conditions.length > 0 ? ' WHERE ' + conditions.join(' AND ') : '';
 
     // Ordering
-    const orderBy = params.orderby || 'id';
+    const requestedOrderBy = params.orderby || 'id';
+    const orderBy = columns.has(requestedOrderBy)
+      ? requestedOrderBy
+      : (columns.has('id') ? 'id' : Array.from(columns)[0]);
     const order = params.order === 'asc' ? 'ASC' : 'DESC';
-    const orderClause = ` ORDER BY ${this.quoteIdent(orderBy)} ${order}`;
+    const orderClause = orderBy ? ` ORDER BY ${this.quoteIdent(orderBy)} ${order}` : '';
 
     // Pagination
     const perPage = parseInt(params.per_page) || 10;
@@ -372,16 +378,17 @@ export class PgRestRouter {
   }
 
   private async insertRow(table: string, data: any): Promise<any> {
-    const cleanData = { ...data };
+    const columns = await this.getTableColumns(table);
+    const cleanData = this.filterDataForTable(data, columns);
     // Remove id if it's auto-generated (SERIAL)
     if (cleanData.id === undefined || cleanData.id === null) {
       delete cleanData.id;
     }
     // Set timestamps
-    if (!cleanData.date_created) {
+    if (columns.has('date_created') && !cleanData.date_created) {
       cleanData.date_created = new Date().toISOString();
     }
-    if (!cleanData.date_modified) {
+    if (columns.has('date_modified') && !cleanData.date_modified) {
       cleanData.date_modified = new Date().toISOString();
     }
 
@@ -391,7 +398,7 @@ export class PgRestRouter {
       return res.rows[0];
     }
 
-    const columns = keys.map(k => this.quoteIdent(k)).join(', ');
+    const columnList = keys.map(k => this.quoteIdent(k)).join(', ');
     const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
     const values = keys.map(k => {
       const v = cleanData[k];
@@ -399,16 +406,19 @@ export class PgRestRouter {
       return v;
     });
 
-    const query = `INSERT INTO ${table} (${columns}) VALUES (${placeholders}) RETURNING *`;
+    const query = `INSERT INTO ${table} (${columnList}) VALUES (${placeholders}) RETURNING *`;
     const res = await this.pool.query(query, values);
     return res.rows[0];
   }
 
   private async updateRow(table: string, idCol: string, idVal: string, data: any, parentKey?: string, parentId?: string): Promise<any> {
-    const cleanData = { ...data };
+    const columns = await this.getTableColumns(table);
+    const cleanData = this.filterDataForTable(data, columns);
     delete cleanData.id;
     delete cleanData[idCol];
-    cleanData.date_modified = new Date().toISOString();
+    if (columns.has('date_modified')) {
+      cleanData.date_modified = new Date().toISOString();
+    }
 
     const keys = Object.keys(cleanData);
     if (keys.length === 0) {
@@ -429,7 +439,7 @@ export class PgRestRouter {
     paramIdx++;
 
     if (parentKey && parentId) {
-      whereClause += ` AND ${parentKey} = $${paramIdx}`;
+      whereClause += ` AND ${this.quoteIdent(parentKey)} = $${paramIdx}`;
       values.push(parentId);
     }
 
@@ -619,5 +629,34 @@ export class PgRestRouter {
       return `"${name}"`;
     }
     return name;
+  }
+
+  private async getTableColumns(table: string): Promise<Set<string>> {
+    const cached = this.columnCache.get(table);
+    if (cached) return cached;
+
+    const [schema, tableName] = table.includes('.')
+      ? table.split('.', 2)
+      : ['public', table];
+    const res = await this.pool.query(
+      `SELECT column_name
+       FROM information_schema.columns
+       WHERE table_schema = $1 AND table_name = $2
+       ORDER BY ordinal_position`,
+      [schema, tableName]
+    );
+    const columns = new Set<string>(res.rows.map((row: any) => row.column_name));
+    this.columnCache.set(table, columns);
+    return columns;
+  }
+
+  private filterDataForTable(data: any, columns: Set<string>): any {
+    const cleanData: any = {};
+    for (const [key, value] of Object.entries(data || {})) {
+      if (columns.has(key)) {
+        cleanData[key] = value;
+      }
+    }
+    return cleanData;
   }
 }

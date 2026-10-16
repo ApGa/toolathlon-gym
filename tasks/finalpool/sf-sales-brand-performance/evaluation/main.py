@@ -162,8 +162,7 @@ def main():
             if "brand" not in _text:
                 all_errors.append("Brand_Summary.docx missing keyword: brand")
         except ImportError:
-            if os.path.getsize(docx_path) < 100:
-                all_errors.append("Brand_Summary.docx too small")
+            all_errors.append("python-docx is not installed, so Brand_Summary.docx cannot be checked")
         except Exception as _e:
             all_errors.append(f"Error reading Brand_Summary.docx: {_e}")
 

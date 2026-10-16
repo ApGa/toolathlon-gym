@@ -1,5 +1,22 @@
 {
-  "needed_mcp_servers": ["arxiv_local", "scholarly", "terminal", "memory", "filesystem"],
-  "needed_local_tools": ["claim_done", "handle_overlong_tool_outputs", "manage_context", "history", "python_execute"],
-  "meta": {}
+  "needed_mcp_servers": [
+    "arxiv_local",
+    "scholarly",
+    "terminal",
+    "memory",
+    "filesystem"
+  ],
+  "needed_local_tools": [
+    "claim_done",
+    "handle_overlong_tool_outputs",
+    "manage_context",
+    "history",
+    "python_execute"
+  ],
+  "meta": {},
+  "http_fixture": {
+    "port": 30151,
+    "source": "files/mock_pages.tar.gz",
+    "root": "mock_pages"
+  }
 }

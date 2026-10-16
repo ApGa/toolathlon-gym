@@ -92,14 +92,17 @@ def check_word_file(agent_workspace):
         return False, "Operations_Summary.docx not found"
     try:
         from docx import Document
+    except ImportError:
+        return False, "python-docx is not installed, so Operations_Summary.docx cannot be checked"
+    try:
         doc = Document(word_path)
-        full_text = " ".join(p.text for p in doc.paragraphs)
-        full_text += " ".join(cell.text for t in doc.tables for row in t.rows for cell in row.cells)
-        if "order status" in full_text.lower() or "operations" in full_text.lower() or "completed" in full_text.lower():
-            return True, ""
-        return False, "Word doc does not contain expected content about order status"
-    except Exception:
+    except Exception as e:
+        return False, f"Operations_Summary.docx is not a readable Word document: {e}"
+    full_text = " ".join(p.text for p in doc.paragraphs)
+    full_text += " ".join(cell.text for t in doc.tables for row in t.rows for cell in row.cells)
+    if "order status" in full_text.lower() or "operations" in full_text.lower() or "completed" in full_text.lower():
         return True, ""
+    return False, "Word doc does not contain expected content about order status"
 
 
 def main():

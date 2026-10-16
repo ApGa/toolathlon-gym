@@ -14,5 +14,10 @@
     "manage_context",
     "history"
   ],
-  "meta": {}
+  "meta": {},
+  "http_fixture": {
+    "port": 30207,
+    "source": "files/mock_pages.tar.gz",
+    "root": "mock_pages"
+  }
 }

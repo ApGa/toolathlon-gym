@@ -22,8 +22,8 @@ def clear_writable_schemas():
     cur.execute("DELETE FROM notion.blocks")
     cur.execute("DELETE FROM notion.pages")
     cur.execute("DELETE FROM notion.databases")
-    cur.execute("DELETE FROM scholarly.scholar_papers")
-    cur.execute("DELETE FROM scholarly.arxiv_papers")
+    # Keep the searchable research corpus used by this task. The previous
+    # reset removed every paper matching the prompt's requested topics.
     conn.commit()
     cur.close()
     conn.close()

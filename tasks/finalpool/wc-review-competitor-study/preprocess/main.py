@@ -1,9 +1,10 @@
-"""Preprocess for wc-review-competitor-study. Sets up mock server and clears notion."""
+"""Prepare task data for wc-review-competitor-study.
+
+HTTP fixture lifecycle is managed by the environment server (task_config.json).
+"""
 import argparse
 import asyncio
 import os
-import shutil
-import tarfile
 
 import psycopg2
 
@@ -14,7 +15,6 @@ DB_CONFIG = {
     "user": "eigent",
     "password": "camel",
 }
-PORT = 30203
 
 
 def clear_notion(cur):
@@ -39,38 +39,6 @@ def clear_notion(cur):
     print("[preprocess] Notion data cleared and parent pages injected.")
 
 
-async def setup_mock_server():
-    """Extract mock_pages.tar.gz and start HTTP server."""
-    task_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    files_dir = os.path.join(task_root, "files")
-    tmp_dir = os.path.join(task_root, "tmp")
-
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    tar_path = os.path.join(files_dir, "mock_pages.tar.gz")
-    with tarfile.open(tar_path, "r:gz") as tar:
-        tar.extractall(path=tmp_dir)
-
-    serve_dir = os.path.join(tmp_dir, "mock_pages")
-
-    kill_proc = await asyncio.create_subprocess_shell(
-        f"kill -9 $(lsof -ti:{PORT}) 2>/dev/null",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await kill_proc.wait()
-    await asyncio.sleep(0.5)
-
-    await asyncio.create_subprocess_shell(
-        f"nohup python3 -m http.server {PORT} --directory {serve_dir} "
-        f"> {tmp_dir}/server.log 2>&1 &"
-    )
-    await asyncio.sleep(1)
-    print(f"[preprocess] Mock server running at http://localhost:{PORT}")
-
-
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
@@ -90,7 +58,6 @@ async def main():
         cur.close()
         conn.close()
 
-    await setup_mock_server()
     print("[preprocess] Preprocessing completed successfully!")
 
 

@@ -14,6 +14,7 @@ import sys
 
 import openpyxl
 import psycopg2
+from grader_helpers import rich_text
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
@@ -222,7 +223,7 @@ def check_notion():
                 if title_parts:
                     break
 
-        page_title = "".join(p.get("plain_text", "") for p in title_parts)
+        page_title = rich_text(title_parts)
 
         if "competitor" in page_title.lower():
             found_page = True
@@ -277,7 +278,7 @@ def check_notion():
                 title_parts = prop.get("title", [])
                 if title_parts:
                     break
-        page_title = "".join(p.get("plain_text", "") for p in title_parts)
+        page_title = rich_text(title_parts)
         if "competitor" not in page_title.lower():
             non_competitor_pages.append(page_title)
     if non_competitor_pages:
@@ -285,7 +286,8 @@ def check_notion():
                f"Found {len(non_competitor_pages)} extra page(s): {non_competitor_pages[:3]}")
         all_ok = False
     else:
-        record("No unexpected Notion pages", True)
+        # Without the analysis page there is nothing to validate.
+        record("No unexpected Notion pages", found_page, "No competitor page was created")
 
     return all_ok
 
@@ -296,14 +298,24 @@ def check_memory(agent_workspace):
     if not os.path.isfile(memory_path):
         record("Memory file exists", False, f"Not found: {memory_path}")
         return False
-    record("Memory file exists", True)
 
     try:
         with open(memory_path, "r") as f:
             data = json.load(f)
     except Exception as e:
+        record("Memory file exists", True)
         record("Memory file is valid JSON", False, str(e))
         return False
+
+    # The initial workspace already ships {"notes": []}, and the memory server
+    # writes it back with an empty graph after any call that adds nothing, so
+    # the file only counts once the agent has recorded something in it.
+    empty = not any(data.values()) if isinstance(data, dict) else not data
+    if empty:
+        record("Memory file exists", False, "memory.json holds no notes or entities")
+        return False
+
+    record("Memory file exists", True)
     record("Memory file is valid JSON", True)
 
     content = json.dumps(data).lower()

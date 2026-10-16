@@ -1,4 +1,7 @@
-"""Preprocess script for terminal-arxiv-latex-fetch-excel-notion task."""
+"""Prepare task data for terminal-arxiv-latex-fetch-excel-notion.
+
+HTTP fixture lifecycle is managed by the environment server (task_config.json).
+"""
 import os
 import argparse, json, os, sys, shutil, tarfile, subprocess, time
 
@@ -8,7 +11,6 @@ DB_CONFIG = {
     "user": "eigent", "password": "camel"
 }
 
-TASK_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 PAPERS = [
     {
@@ -115,35 +117,6 @@ def inject_papers():
     print(f"[preprocess] Injected {len(PAPERS)} papers + {len(NOISE_PAPERS)} noise into arxiv_latex")
 
 
-def setup_mock_server(port=30412):
-    files_dir = os.path.join(TASK_ROOT, "files")
-    tmp_dir = os.path.join(TASK_ROOT, "tmp")
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    try:
-        subprocess.run(f"kill -9 $(lsof -ti:{port}) 2>/dev/null", shell=True, timeout=5)
-    except Exception:
-        pass
-    time.sleep(0.5)
-
-    tar_path = os.path.join(files_dir, "mock_pages.tar.gz")
-    if os.path.exists(tar_path):
-        with tarfile.open(tar_path, "r:gz") as tar:
-            tar.extractall(path=tmp_dir)
-
-    mock_dir = os.path.join(tmp_dir, "mock_pages")
-    if os.path.exists(mock_dir):
-        log_path = os.path.join(mock_dir, "server.log")
-        subprocess.Popen(
-            f"nohup python3 -m http.server {port} --directory {mock_dir} > {log_path} 2>&1 &",
-            shell=True
-        )
-        time.sleep(1)
-        print(f"Mock server started on port {port}")
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
@@ -152,7 +125,6 @@ def main():
 
     clear_schemas()
     inject_papers()
-    setup_mock_server(30412)
 
 
 if __name__ == "__main__":

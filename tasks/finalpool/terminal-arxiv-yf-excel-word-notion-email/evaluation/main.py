@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 
 import openpyxl
@@ -364,7 +365,7 @@ def check_reverse_validation(ws_path):
                   no_noise_notion,
                   f"Found noise paper in Research Pipeline pages")
         else:
-            check("No noise arxiv papers in Notion tracker", True, "No Research Pipeline DB to check")
+            check("No noise arxiv papers in Notion tracker", False, "No Research Pipeline DB to check")
 
         # --- Check no emails to wrong recipients ---
         noise_recipients = ["team@firm.com", "office@firm.com", "social@firm.com", "admin@firm.com"]
@@ -375,10 +376,14 @@ def check_reverse_validation(ws_path):
         """)
         sent_emails = cur.fetchall()
         all_to = " ".join(json.dumps(to).lower() for _, to in sent_emails if to)
-        no_noise_email = not any(na in all_to for na in noise_recipients)
+        # Match whole addresses: "team@firm.com" is a suffix of the required
+        # recipient portfolio_team@firm.com.
+        no_noise_email = not any(re.search(r"(?<![\w.+-])" + re.escape(na) + r"(?![\w.-])", all_to)
+                                 for na in noise_recipients)
+        # Without sent mail there is nothing to validate.
         check("No emails sent to noise recipients (team@firm, office@firm, social@firm)",
-              no_noise_email,
-              f"Sent to: {all_to[:200]}")
+              bool(sent_emails) and no_noise_email,
+              f"Sent to: {all_to[:200]}" if sent_emails else "No e-mail was sent")
 
         cur.close()
         conn.close()

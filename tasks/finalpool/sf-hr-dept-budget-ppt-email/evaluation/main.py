@@ -138,8 +138,7 @@ def check_pptx(agent_workspace):
             if dept not in all_text_lower:
                 errors.append(f"PPTX missing department: {dept}")
     except ImportError:
-        if os.path.getsize(pptx_path) < 1000:
-            errors.append("HR_Department_Overview.pptx too small")
+        errors.append("python-pptx is not installed, so HR_Department_Overview.pptx cannot be checked")
     except Exception as e:
         errors.append(f"Error reading HR_Department_Overview.pptx: {e}")
     return errors

@@ -25,7 +25,7 @@ const requests = defineTabTool({
   schema: {
     name: 'browser_network_requests',
     title: 'List network requests',
-    description: 'Returns all network requests since loading the page',
+    description: 'Returns up to the 1000 most recent network requests since loading the page.',
     inputSchema: z.object({}),
     type: 'readOnly',
   },

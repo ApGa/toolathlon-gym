@@ -36,23 +36,26 @@ def str_match(a, b):
     return str(a).strip().lower() == str(b).strip().lower()
 
 
-EXPECTED_ASSIGNMENTS = [
-    ("CMA 34904", 1454, 85.10, 32, 2.20),
-    ("CMA 34905", 1363, 88.25, 45, 3.30),
-    ("CMA 34906", 1254, 77.22, 70, 5.58),
-    ("CMA 34907", 1234, 78.81, 72, 5.83),
-    ("CMA 34908", 1213, 78.76, 85, 7.01),
-    ("CMA 34909", 1213, 77.10, 134, 11.05),
-    ("CMA 34910", 1184, 77.33, 118, 9.97),
-    ("TMA 34899", 1826, 78.60, 173, 9.47),
-    ("TMA 34900", 1601, 78.11, 212, 13.24),
-    ("TMA 34901", 1398, 74.28, 322, 23.03),
-    ("TMA 34902", 1307, 73.48, 257, 19.66),
-    ("TMA 34903", 1137, 76.36, 149, 13.10),
-]
+def expected_assignments():
+    conn = psycopg2.connect(**DB)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT a.name, COUNT(s.id), ROUND(AVG(s.score), 2),
+                       COUNT(s.id) FILTER (WHERE s.late),
+                       COALESCE(ROUND(100.0 * COUNT(s.id) FILTER (WHERE s.late)
+                             / NULLIF(COUNT(s.id), 0), 2), 0)
+                FROM canvas.assignments a
+                LEFT JOIN canvas.submissions s ON s.assignment_id = a.id
+                WHERE a.course_id = 16
+                GROUP BY a.id, a.name ORDER BY a.name
+            """)
+            return cur.fetchall()
+    finally:
+        conn.close()
 
 
-def check_word(agent_workspace, groundtruth_workspace):
+def check_word(agent_workspace, groundtruth_workspace, expected):
     """Check Word document output."""
     print("\n=== Checking Word Document ===")
     try:
@@ -99,19 +102,18 @@ def check_word(agent_workspace, groundtruth_workspace):
               any("late" in h.lower() for h in headers),
               f"Headers: {headers}")
 
-    # Check rows - should have 12 data rows
-    data_rows = list(tbl.rows)[1:]
-    check("Table has 12 data rows", len(data_rows) >= 12,
-          f"Found {len(data_rows)} rows")
-
-    # Check specific assignment data
-    row_names = [row.cells[0].text.strip() for row in data_rows if row.cells]
-    check("CMA 34905 row present",
-          any("cma 34905" in n.lower() for n in row_names),
-          f"Row names: {row_names[:5]}")
-    check("TMA 34901 row present",
-          any("tma 34901" in n.lower() for n in row_names),
-          f"Row names: {row_names[:5]}")
+    data_rows = [[cell.text.strip() for cell in row.cells] for row in list(tbl.rows)[1:]]
+    check("Table contains every course-16 assignment", len(data_rows) == len(expected))
+    check("Assignment rows sorted alphabetically", [r[0].casefold() for r in data_rows] ==
+          sorted(r[0].casefold() for r in data_rows))
+    by_name = {r[0].casefold(): r for r in data_rows}
+    for reference in expected:
+        row = by_name.get(reference[0].casefold())
+        check(f"{reference[0]} data matches course 16", row is not None and len(row) >= 5
+              and all((row[i].strip().casefold() in {"", "n/a", "na", "none", "-", "—"}
+                       if reference[i] is None else
+                       num_close(row[i], reference[i], 0.02 if i in (2, 4) else 0))
+                      for i in range(1, 5)), f"Expected {reference}, got {row}")
 
 
 def check_gform():
@@ -145,7 +147,7 @@ def check_gform():
     conn.close()
 
 
-def check_emails():
+def check_emails(expected):
     """Check that summary email was sent."""
     print("\n=== Checking Emails ===")
     conn = psycopg2.connect(**DB)
@@ -187,15 +189,13 @@ def check_emails():
               "analytics@university.example.com" in (from_addr or "").lower(),
               f"From: {from_addr}")
         body_lower = (body or "").lower()
-        check("Email mentions 12 assignments",
-              "12" in body_lower or "twelve" in body_lower,
-              "Expected mention of 12")
-        check("Email mentions CMA 34905 or highest avg",
-              "cma 34905" in body_lower or ("34905" in body_lower),
-              "Expected CMA 34905 mentioned")
-        check("Email mentions TMA 34901 or most late",
-              "tma 34901" in body_lower or "34901" in body_lower,
-              "Expected TMA 34901 mentioned")
+        check("Email mentions assignment count", str(len(expected)) in body_lower)
+        highest = max(float(r[2]) for r in expected if r[2] is not None)
+        most_late = max(r[3] for r in expected)
+        check("Email mentions highest average assignment",
+              any(r[0].casefold() in body_lower for r in expected if float(r[2] or 0) == highest))
+        check("Email mentions assignment with most late submissions",
+              any(r[0].casefold() in body_lower for r in expected if r[3] == most_late))
 
 
 def main():
@@ -213,9 +213,10 @@ def main():
     print("CANVAS ASSIGNMENT FEEDBACK GFORM WORD - EVALUATION")
     print("=" * 70)
 
-    check_word(args.agent_workspace, gt_dir)
+    expected = expected_assignments()
+    check_word(args.agent_workspace, gt_dir, expected)
     check_gform()
-    check_emails()
+    check_emails(expected)
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")

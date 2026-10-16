@@ -4,6 +4,7 @@ import os
 import sys
 
 import psycopg2
+from grader_helpers import PdfTextError, pdf_text
 
 DB = {"host": os.environ.get("PGHOST", "localhost"), "port": 5432, "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
 
@@ -17,30 +18,6 @@ def num_close(a, b, tol=1.0):
         return abs(float(a) - float(b)) <= tol
     except (TypeError, ValueError):
         return str(a).strip().lower() == str(b).strip().lower()
-
-
-def extract_pdf_text(path):
-    """Extract text from PDF using available libraries."""
-    try:
-        from pypdf import PdfReader
-        reader = PdfReader(path)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() or ""
-        return text
-    except ImportError:
-        pass
-    try:
-        import pdfplumber
-        text = ""
-        with pdfplumber.open(path) as pdf:
-            for page in pdf.pages:
-                text += page.extract_text() or ""
-        return text
-    except ImportError:
-        pass
-    with open(path, "rb") as f:
-        return f.read().decode("latin-1", errors="ignore")
 
 
 def main():
@@ -63,7 +40,11 @@ def main():
         sys.exit(1)
 
     print("  Checking Regional_Sales_Report.pdf...")
-    text = extract_pdf_text(agent_pdf).lower()
+    try:
+        text = pdf_text(agent_pdf).lower()
+    except PdfTextError as error:  # unreadable: every content check below fails too
+        all_errors.append(str(error))
+        text = ""
 
     # Check title
     if "regional sales report" not in text:

@@ -16,15 +16,24 @@ input_schema on demand via `get_tool_details` and invokes it via
 `call_tool`.
 """
 import asyncio
+import functools
 import json
 import os
+import random
+import re
 import shutil
+import stat
 import tempfile
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from signal import SIGCONT, SIGSTOP
 from typing import Any, Sequence
 from uuid import uuid4
+
+from http_fixtures import HTTPFixture, copy_task
+from task_setup import run_preprocess
+from task_process import run_task_process
 
 import yaml
 from pydantic import BaseModel, Field
@@ -49,6 +58,58 @@ LOCAL_SERVERS = "/opt/local_servers"
 TOOL_SCHEMAS_FILE = Path("/app/tool_schemas.json")
 
 CATALOG_DESC_MAX_CHARS = 160
+MCP_OUTPUT_MAX_CHARS = int(os.getenv("OPENREWARD_MCP_OUTPUT_MAX_CHARS", "50000"))
+MCP_OUTPUT_MAX_JSON_STRING_CHARS = int(os.getenv("OPENREWARD_MCP_OUTPUT_MAX_JSON_STRING_CHARS", "2000"))
+MCP_SUBPROCESS_STREAM_LIMIT = int(os.getenv("OPENREWARD_MCP_SUBPROCESS_STREAM_LIMIT", str(16 * 1024 * 1024)))
+REWARD_MODE_ENV = "OPENREWARD_REWARD_MODE"
+GRADER_RESULT_FILE = "eval_result.json"
+GRADER_RESULT_MAX_BYTES = 16 * 1024 * 1024
+GRADER_TIMEOUT_S = 120
+TOOL_ROUTING_SCHEMA_KEY = "x-openhands-tool-routing"
+TOOL_ERROR_META_KEY = "openhands.dev/tool-error"
+
+
+def _with_tool_routing(
+    spec: ToolSpec,
+    *,
+    capabilities: tuple[str, ...],
+    invocation: dict[str, Any],
+) -> ToolSpec:
+    """Attach routing metadata through an ignorable JSON-Schema extension.
+
+    OpenReward's current ``ToolSpec`` has no arbitrary metadata field.  A
+    namespaced root schema extension survives the OpenReward API and remains
+    harmless to clients that do not understand orchestration routing.
+    """
+
+    schema = dict(spec.input_schema or {"type": "object", "properties": {}})
+    schema[TOOL_ROUTING_SCHEMA_KEY] = {
+        "version": 1,
+        "execution_domain": "task",
+        "capabilities": list(capabilities),
+        "invocation": invocation,
+    }
+    return spec.model_copy(update={"input_schema": schema})
+
+
+def _tool_error_output(message: str, *, kind: str) -> ToolOutput:
+    """Return a recoverable error that tool-aware clients can identify.
+
+    OpenReward ``ToolOutput`` does not yet have an error discriminator.  Keep
+    the session usable for a corrective call and declare the error through a
+    namespaced metadata marker that the Platoon OpenReward bridge translates
+    to MCP ``isError``.
+    """
+
+    return ToolOutput(
+        blocks=[TextBlock(text=message)],
+        metadata={
+            TOOL_ERROR_META_KEY: {
+                "kind": kind,
+                "message": message,
+            }
+        },
+    )
 
 # ── Load pre-discovered tool schemas ─────────────────────────────────────────
 
@@ -57,15 +118,323 @@ if TOOL_SCHEMAS_FILE.exists():
     ALL_TOOL_SCHEMAS = json.loads(TOOL_SCHEMAS_FILE.read_text())
 
 
+def _json_path(parent: str, key: Any) -> str:
+    if isinstance(key, int):
+        return f"{parent}[{key}]"
+    key_str = str(key)
+    if key_str.isidentifier():
+        return f"{parent}.{key_str}"
+    return f"{parent}[{key_str!r}]"
+
+
+def _sanitize_json_value(
+    value: Any,
+    truncations: list[dict[str, Any]],
+    path: str = "$",
+) -> Any:
+    """Keep MCP JSON results readable without giant unsplittable string lines."""
+    if isinstance(value, str):
+        if len(value) > MCP_OUTPUT_MAX_JSON_STRING_CHARS:
+            omitted = len(value) - MCP_OUTPUT_MAX_JSON_STRING_CHARS
+            truncations.append({"path": path, "omitted_chars": omitted})
+            return (
+                value[:MCP_OUTPUT_MAX_JSON_STRING_CHARS]
+                + f"... [truncated {omitted} chars at {path}]"
+            )
+        return value
+    if isinstance(value, list):
+        return [
+            _sanitize_json_value(item, truncations, _json_path(path, index))
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_json_value(item, truncations, _json_path(path, key))
+            for key, item in value.items()
+        }
+    return value
+
+
+def _safe_mcp_output(text: str) -> str:
+    """Bound MCP tool output and make any truncation explicit.
+
+    Some MCP servers return large JSON blobs with very long string fields (for
+    example Canvas HTML bodies). Prefer preserving valid JSON by truncating
+    long string values and adding an explicit notice with the affected paths.
+    """
+    notices: list[str] = []
+    try:
+        parsed = json.loads(text)
+        truncations: list[dict[str, Any]] = []
+        sanitized = _sanitize_json_value(parsed, truncations)
+        if truncations:
+            notice = {
+                "message": (
+                    "Large MCP output was shortened before returning it to "
+                    "the agent to avoid downstream chunking errors. Use a "
+                    "more specific Canvas query/get tool if omitted content "
+                    "is needed."
+                ),
+                "max_json_string_chars": MCP_OUTPUT_MAX_JSON_STRING_CHARS,
+                "truncated_field_count": len(truncations),
+                "truncated_fields": truncations[:50],
+            }
+            if isinstance(sanitized, dict):
+                sanitized = {"__toolathlon_output_notice": notice, **sanitized}
+            else:
+                sanitized = {
+                    "__toolathlon_output_notice": notice,
+                    "data": sanitized,
+                }
+        text = json.dumps(sanitized, indent=2)
+    except (TypeError, json.JSONDecodeError):
+        pass
+
+    if len(text) > MCP_OUTPUT_MAX_CHARS:
+        omitted = len(text) - MCP_OUTPUT_MAX_CHARS
+        notices.append(
+            f"Large MCP output exceeded {MCP_OUTPUT_MAX_CHARS} characters; "
+            f"{omitted} trailing characters were omitted."
+        )
+        text = text[:MCP_OUTPUT_MAX_CHARS] + f"\n... (output truncated, {omitted} chars omitted)"
+
+    if notices:
+        return "Toolathlon output notice: " + " ".join(notices) + "\n" + text
+    return text
+
+
+def _as_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _score_from_counts(passed: Any, total: Any = None, failed: Any = None) -> float | None:
+    passed_num = _as_number(passed)
+    total_num = _as_number(total)
+    failed_num = _as_number(failed)
+    if total_num is None and failed_num is not None and passed_num is not None:
+        total_num = passed_num + failed_num
+    if passed_num is None or total_num is None or total_num <= 0:
+        return None
+    return max(0.0, min(1.0, passed_num / total_num))
+
+
+def _score_from_result_json(value: Any) -> float | None:
+    if not isinstance(value, dict):
+        return None
+
+    for passed_key, total_key in (
+        ("total_passed", "total_checks"),
+        ("passed", "total"),
+        ("pass", "total"),
+    ):
+        if passed_key in value and total_key in value:
+            score = _score_from_counts(value.get(passed_key), value.get(total_key))
+            if score is not None:
+                return score
+
+    for passed_key, failed_key in (
+        ("passed", "failed"),
+        ("pass", "fail"),
+        ("total_passed", "total_failed"),
+    ):
+        if passed_key in value and failed_key in value:
+            score = _score_from_counts(value.get(passed_key), failed=value.get(failed_key))
+            if score is not None:
+                return score
+
+    for percent_key in ("accuracy", "percentage", "percent"):
+        if percent_key in value:
+            percent = _as_number(value.get(percent_key))
+            if percent is not None:
+                return max(0.0, min(1.0, percent / 100.0))
+
+    for score_key in ("reward", "score"):
+        if score_key in value:
+            score = _as_number(value.get(score_key))
+            if score is not None and 0.0 <= score <= 1.0:
+                return score
+
+    for item in value.values():
+        if isinstance(item, dict):
+            score = _score_from_result_json(item)
+            if score is not None:
+                return score
+    return None
+
+
+# A summary starts its line, after optional indentation, a "===" banner, a
+# "File checks -"/"DB checks -" section label or a "Result: PASS -" prefix.
+_SUMMARY_LINE_START = (
+    r"^[ \t]*(?:=+[ \t]*)?"
+    r"(?:(?P<section>File|DB)[ \t]+checks[ \t]*-[ \t]*)?"
+    r"(?:Result:[ \t]*(?:PASS|FAIL)[ \t]*-[ \t]*)?"
+)
+_SUMMARY_PATTERNS = tuple(
+    re.compile(_SUMMARY_LINE_START + body, re.IGNORECASE | re.MULTILINE)
+    for body in (
+        r"Overall:\s*(?P<passed>\d+(?:\.\d+)?)\s*/\s*(?P<total>\d+(?:\.\d+)?)\s+checks\s+passed",
+        r"Results?:\s*(?P<passed>\d+(?:\.\d+)?)\s*/\s*(?P<total>\d+(?:\.\d+)?)\s+passed",
+        r"Passed:\s*(?P<passed>\d+(?:\.\d+)?)\s*,?\s*Failed:\s*(?P<failed>\d+(?:\.\d+)?)",
+    )
+)
+# run_task_process appends this when it cuts the output short.
+_OUTPUT_TRUNCATED_NOTICE = "[Output truncated; write large results to a workspace file.]"
+
+
+def _score_from_eval_output(output: str) -> float | None:
+    """The fraction of checks passed, from the grader's last summary line.
+
+    ``output`` is the grader's stdout. In 9,172 recorded grader outputs (the
+    no-op audits and the v16 training epoch) every summary starts its line
+    and only fixed status lines follow the last one, while text a grader
+    echoes from the agent's work comes before it or after a label. So the
+    last summary that starts a line is the grader's own; an earlier one may
+    not be. Graders that report "File checks" and "DB checks" separately
+    keep being scored on their File checks, the line before the DB checks.
+    Output cut short may have lost the grader's summary, so it has none.
+    """
+    if output.rstrip().endswith(_OUTPUT_TRUNCATED_NOTICE):
+        return None
+    matches = sorted(
+        (match for pattern in _SUMMARY_PATTERNS for match in pattern.finditer(output)),
+        key=lambda match: match.end(),
+    )
+    if not matches:
+        return None
+    chosen = matches[-1]
+    if (
+        len(matches) > 1
+        and (chosen.group("section") or "").lower() == "db"
+        and (matches[-2].group("section") or "").lower() == "file"
+        and not output[matches[-2].end():chosen.start()].strip()
+    ):
+        chosen = matches[-2]
+    groups = chosen.groupdict()
+    if groups.get("failed") is not None:
+        return _score_from_counts(groups["passed"], failed=groups["failed"])
+    return _score_from_counts(groups["passed"], groups["total"])
+
+
+def _load_grader_result(res_log: Path) -> Any:
+    """Parse the result file the grader wrote, or return None.
+
+    Only a regular file is read, never a symlink, FIFO or device, so nothing
+    placed at the path can redirect the read or block the server.
+    """
+    try:
+        fd = os.open(res_log, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > GRADER_RESULT_MAX_BYTES:
+                return None
+            data = stream.read(GRADER_RESULT_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > GRADER_RESULT_MAX_BYTES:
+        return None
+    try:
+        return json.loads(data)
+    except (ValueError, RecursionError):
+        return None
+
+
+def _partial_reward_from_grader(res_log: Path, output: str) -> float | None:
+    """The grader's fraction of passed checks: its result file, else its stdout.
+
+    ``res_log`` must not exist before the grader starts: claim_done puts it in
+    a new directory outside the agent's workspace.
+    """
+    score = _score_from_result_json(_load_grader_result(res_log))
+    if score is not None:
+        return score
+    return _score_from_eval_output(output)
+
+
+def _reward_for_evaluation(binary_reward: float, res_log: Path, output: str) -> float:
+    mode = os.getenv(REWARD_MODE_ENV, "binary").strip().lower()
+    if mode not in {"partial", "partials", "fractional"}:
+        return binary_reward
+
+    partial_reward = _partial_reward_from_grader(res_log, output)
+    if partial_reward is None:
+        return binary_reward
+    return partial_reward
+
+
+# ── Server configuration ─────────────────────────────────────────────────────
+
+def _get_server_port() -> int:
+    raw_port = os.getenv("OPENREWARD_PORT") or os.getenv("PORT") or "8080"
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise ValueError(f"Invalid server port: {raw_port!r}") from exc
+
+    if not 1 <= port <= 65535:
+        raise ValueError(f"Server port must be between 1 and 65535: {port}")
+
+    return port
+
+
+def _now() -> datetime:
+    """Wall-clock now, unless OPENREWARD_FROZEN_DATE pins the calendar date.
+
+    Many tasks (and the PG-backed 12306 server's `checkDate`) compare task
+    dates against "today". The benchmark was authored with a fixed reference
+    date, so once real wall-clock drifts past it those tasks become
+    unsolvable. Setting OPENREWARD_FROZEN_DATE=YYYY-MM-DD freezes the calendar
+    date the env reports (time-of-day still tracks the wall clock) so the
+    benchmark stays reproducible. The same env var is read by the 12306 MCP
+    server (it is inherited by every subprocess).
+    """
+    frozen = os.getenv("OPENREWARD_FROZEN_DATE")
+    if frozen:
+        try:
+            d = datetime.strptime(frozen.strip()[:10], "%Y-%m-%d").date()
+            return datetime.combine(d, datetime.now().time())
+        except ValueError:
+            pass
+    return datetime.now()
+
+
+# psql/Postgres errors that are transient under high concurrency (connection
+# exhaustion, startup races, template-in-use) and worth retrying with backoff
+# instead of failing the whole session setup.
+_TRANSIENT_PG_ERRORS = (
+    "too many clients",
+    "remaining connection slots",
+    "could not connect",
+    "connection refused",
+    "the database system is starting up",
+    "the database system is shutting down",
+    "is being accessed by other users",
+    "could not obtain lock",
+    "deadlock detected",
+)
+
+
 # ── Template resolution (from original tool_servers.py) ──────────────────────
 
-def _resolve(value: str, workspace: str) -> str:
+def _resolve(value: str, workspace: str, task_dir: str = "") -> str:
     if not isinstance(value, str):
         return value
     return (
         value
         .replace("${local_servers_paths}", LOCAL_SERVERS)
         .replace("${agent_workspace}", workspace)
+        .replace("${task_dir}", task_dir)
     )
 
 
@@ -132,9 +501,11 @@ class _MCPProcess:
             "arguments": arguments,
         }, timeout=120)
         if resp is None:
-            return "Error: MCP tool call timed out"
+            raise TimeoutError("MCP tool call timed out after 120 seconds")
         if "error" in resp:
-            return f"Error: {resp['error'].get('message', str(resp['error']))}"
+            error = resp["error"]
+            detail = error.get("message", str(error)) if isinstance(error, dict) else str(error)
+            raise RuntimeError(f"MCP tool call failed: {detail}")
         result = resp.get("result", {})
         # Extract content from MCP result
         content_parts = result.get("content", [])
@@ -146,7 +517,10 @@ class _MCPProcess:
                 texts.append(json.dumps(part))
             else:
                 texts.append(str(part))
-        return "\n".join(texts) if texts else json.dumps(result)
+        output = "\n".join(texts) if texts else json.dumps(result)
+        if result.get("isError") is True:
+            raise RuntimeError(output or "MCP tool reported an error")
+        return output
 
     async def close(self):
         try:
@@ -162,9 +536,13 @@ class _MCPProcess:
 class MCPBridge:
     """Manages MCP server subprocesses for a single session."""
 
-    def __init__(self, needed_servers: list[str], workspace_dir: str, pg_env: dict[str, str]):
+    def __init__(
+        self, needed_servers: list[str], workspace_dir: str, pg_env: dict[str, str],
+        *, task_dir: str = "",
+    ):
         self.needed_servers = needed_servers
         self.workspace_dir = workspace_dir
+        self.task_dir = task_dir
         # Env overrides (PGHOST, PGDATABASE, …) applied AFTER any YAML-set env
         # so e.g. `PG_DATABASE: "toolathlon"` in 12306.yaml gets overridden by
         # the per-session DB name.
@@ -190,10 +568,10 @@ class MCPBridge:
                 continue
 
             params = cfg.get("params", {})
-            command = _resolve(params.get("command", ""), self.workspace_dir)
-            args = [_resolve(a, self.workspace_dir) for a in params.get("args", [])]
-            env_vars = {k: _resolve(v, self.workspace_dir) for k, v in params.get("env", {}).items()}
-            cwd = _resolve(params.get("cwd", self.workspace_dir), self.workspace_dir)
+            command = _resolve(params.get("command", ""), self.workspace_dir, self.task_dir)
+            args = [_resolve(a, self.workspace_dir, self.task_dir) for a in params.get("args", [])]
+            env_vars = {k: _resolve(v, self.workspace_dir, self.task_dir) for k, v in params.get("env", {}).items()}
+            cwd = _resolve(params.get("cwd", self.workspace_dir), self.workspace_dir, self.task_dir)
 
             # For "uv run <script>" without --directory, infer cwd from script path
             if command == "uv" and "run" in args and "cwd" not in params:
@@ -207,6 +585,11 @@ class MCPBridge:
             # (which hardcode `PG_DATABASE: "toolathlon"`) get rewired to the
             # per-session DB.
             full_env = {**os.environ, **env_vars, **self.pg_env}
+            if name == "terminal":
+                # uv activates the MCP server's minimal venv. Agent commands
+                # need the task interpreter/dependencies used by python_execute.
+                full_env["TOOLATHLON_TASK_PATH"] = full_env.get("PATH", os.defpath)
+                full_env["TOOLATHLON_TASK_VIRTUAL_ENV"] = full_env.get("VIRTUAL_ENV", "")
             os.makedirs(cwd, exist_ok=True)
 
             try:
@@ -217,31 +600,57 @@ class MCPBridge:
                     stderr=asyncio.subprocess.PIPE,
                     env=full_env,
                     cwd=cwd,
+                    limit=MCP_SUBPROCESS_STREAM_LIMIT,
                 )
                 mcp_proc = _MCPProcess(name, proc)
-                await asyncio.sleep(1.5)  # let server boot
 
-                if await mcp_proc.initialize():
+                # Readiness-poll instead of a fixed sleep. initialize() blocks
+                # up to its own timeout for the server's response, so under
+                # load a slow (node/uv) boot is tolerated without paying a
+                # flat per-server delay on the fast path. Retry a few times in
+                # case the process is still wiring up stdio.
+                ok = False
+                for attempt in range(4):
+                    if proc.returncode is not None:
+                        break  # process already exited; don't keep polling
+                    try:
+                        if await mcp_proc.initialize():
+                            ok = True
+                            break
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.5 * (attempt + 1))
+
+                if ok:
                     self._processes[name] = mcp_proc
                 else:
-                    print(f"[MCPBridge] WARNING: Failed to initialize {name}")
+                    detail = ""
+                    if proc.returncode is not None and proc.stderr is not None:
+                        try:
+                            err = await asyncio.wait_for(proc.stderr.read(2000), timeout=1)
+                            detail = f" (rc={proc.returncode}): {err.decode(errors='replace').strip()[:300]}"
+                        except Exception:
+                            detail = f" (rc={proc.returncode})"
+                    print(f"[MCPBridge] WARNING: Failed to initialize {name}{detail}", flush=True)
                     await mcp_proc.close()
             except Exception as e:
-                print(f"[MCPBridge] WARNING: Failed to launch {name}: {e}")
+                print(f"[MCPBridge] WARNING: Failed to launch {name}: {e}", flush=True)
 
     async def call_tool(self, tool_name: str, arguments: dict, *, server: str | None = None) -> str:
         candidates = self._tool_servers.get(tool_name) or []
         if not candidates:
-            return f"Error: Unknown tool '{tool_name}'"
+            raise ValueError(f"Unknown tool '{tool_name}'")
         if server is not None:
             if server not in candidates:
-                return f"Error: Tool '{tool_name}' is not provided by server '{server}'"
+                raise ValueError(
+                    f"Tool '{tool_name}' is not provided by server '{server}'"
+                )
             chosen = server
         else:
             chosen = candidates[0]  # ambiguous: first registered wins
         proc = self._processes.get(chosen)
         if not proc:
-            return f"Error: Server '{chosen}' is not running"
+            raise RuntimeError(f"Server '{chosen}' is not running")
         return await proc.call_tool(tool_name, arguments)
 
     async def close(self):
@@ -283,17 +692,48 @@ class CallToolInput(BaseModel):
 
 class ToolathlonGym(Environment):
 
+    @classmethod
+    @functools.cache
+    def list_tools(cls) -> ListToolsOutput:
+        """Advertise routing metadata for the environment's direct tools."""
+
+        tools: list[ToolSpec] = []
+        for spec in super().list_tools().tools:
+            if spec.name == "python_execute":
+                spec = _with_tool_routing(
+                    spec,
+                    capabilities=(
+                        "python.execute",
+                        "filesystem.read",
+                        "filesystem.write",
+                        "system.execute",
+                    ),
+                    invocation={"kind": "direct"},
+                )
+            elif spec.name == "claim_done":
+                spec = _with_tool_routing(
+                    spec,
+                    capabilities=("task.submit",),
+                    invocation={"kind": "direct"},
+                )
+            tools.append(spec)
+        return ListToolsOutput(tools=tools)
+
     def __init__(self, task_spec: dict = {}, secrets: dict[str, str] = {}):
         super().__init__(task_spec, secrets)
         self.task_name: str = task_spec.get("task_name", "")
         self.task_dir = TASKS_ROOT / self.task_name
+        self._source_task_dir = self.task_dir
+        self._session_dir: Path | None = None
+        self._http_fixture: HTTPFixture | None = None
         self.workspace_dir = Path(f"/tmp/workspaces/{uuid4()}")
         # Per-session Postgres DB cloned from `toolathlon_template` so tasks
         # can never see each other's mutations, even when sessions share a pod.
         self._db_name = f"s_{uuid4().hex[:16]}"
         self._task_config: dict = {}
-        self._launch_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self._launch_time_display = datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
+        _launch_dt = _now()
+        self._launch_time = _launch_dt.strftime("%Y-%m-%d %H:%M:%S")
+        self._launch_time_display = _launch_dt.strftime("%Y-%m-%d %H:%M:%S %A")
         self._mcp_bridge: MCPBridge | None = None
         # Build set of MCP tool names for routing in _call_tool. Keys are the
         # bare (unprefixed) tool names that MCPBridge dispatches against.
@@ -306,23 +746,41 @@ class ToolathlonGym(Environment):
 
     def _pg_env(self) -> dict[str, str]:
         """Env additions that point any subprocess at this session's DB."""
+        pythonpath_parts = ["/app/runtime_patches"]
+        existing_pythonpath = os.environ.get("PYTHONPATH")
+        if existing_pythonpath:
+            pythonpath_parts.append(existing_pythonpath)
         return {
             "PGHOST": "localhost",
             "PG_HOST": "localhost",
             "PGDATABASE": self._db_name,
             "PG_DATABASE": self._db_name,
+            "PYTHONPATH": os.pathsep.join(pythonpath_parts),
         }
 
-    async def _psql(self, sql: str, *, dbname: str = "postgres") -> None:
-        proc = await asyncio.create_subprocess_exec(
-            "psql", "-U", "eigent", "-d", dbname, "-v", "ON_ERROR_STOP=1", "-c", sql,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env={**os.environ, "PGHOST": "localhost"},
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(f"psql failed ({proc.returncode}): {stderr.decode()[:500]}")
+    async def _psql(self, sql: str, *, dbname: str = "postgres", retries: int = 10) -> None:
+        # Retry transient failures (connection exhaustion, startup races,
+        # template-in-use) with exponential backoff + jitter. Under 128-wide
+        # concurrency a momentary "too many clients" on CREATE DATABASE must
+        # not kill the whole session — it just needs to wait its turn.
+        last_err = ""
+        for attempt in range(retries):
+            proc = await asyncio.create_subprocess_exec(
+                "psql", "-U", "eigent", "-d", dbname, "-v", "ON_ERROR_STOP=1", "-c", sql,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, "PGHOST": "localhost"},
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode == 0:
+                return
+            last_err = stderr.decode()[:500]
+            is_transient = any(s in last_err.lower() for s in _TRANSIENT_PG_ERRORS)
+            if not is_transient or attempt == retries - 1:
+                raise RuntimeError(f"psql failed ({proc.returncode}): {last_err}")
+            delay = min(0.5 * (2 ** attempt), 8.0) + random.uniform(0, 0.5)
+            await asyncio.sleep(delay)
+        raise RuntimeError(f"psql failed after {retries} attempts: {last_err}")
 
     async def setup(self):
         # Clone the seeded template into a fresh per-session DB. Done first so
@@ -335,22 +793,35 @@ class ToolathlonGym(Environment):
         except BaseException:
             # The framework only calls teardown() once the env is registered
             # in active_envs, which happens AFTER setup() returns. If we fail
-            # mid-setup, drop the DB ourselves so we don't leak.
+            # mid-setup, release all resources ourselves so we don't leak.
             try:
-                await self._psql(
-                    f'DROP DATABASE IF EXISTS "{self._db_name}" WITH (FORCE);'
-                )
-            except Exception:
-                pass
+                await self.teardown()
+            except Exception as exc:
+                print(f"[setup] Cleanup failed task={self.task_name} session={self._db_name}: {exc}", flush=True)
             raise
 
     async def _setup_after_db(self):
+        # Preprocessors and graders sometimes write next to __file__. Keep the
+        # image immutable and make those paths private and user-owned too.
+        if not (self._source_task_dir / "task_config.json").is_file():
+            raise ValueError(f"Unknown task: {self.task_name!r}")
+        self._session_dir = Path(tempfile.mkdtemp(prefix=f"toolathlon-{self._db_name}-"))
+        self.task_dir = self._session_dir / "task"
+        copy_task(self._source_task_dir, self.task_dir)
+
         # Load task config
         config_path = self.task_dir / "task_config.json"
         if config_path.exists():
             self._task_config = json.loads(config_path.read_text())
 
         needed_servers = self._task_config.get("needed_mcp_servers", [])
+
+        if spec := self._task_config.get("http_fixture"):
+            self._http_fixture = HTTPFixture(self.task_dir, self._session_dir, spec)
+            self._http_fixture.start()
+            # Prompts, initial text inputs, database seed URLs in preprocessing,
+            # and grader expectations all use the episode's actual endpoint.
+            self._http_fixture.rewrite_tree(self.task_dir)
 
         # Build the per-task tool index used by both the system-prompt catalog
         # and the meta-tools. Every tool is exposed with a `server.bare`
@@ -387,35 +858,101 @@ class ToolathlonGym(Environment):
         for subdir in ["arxiv_local_storage", "memory", ".playwright_output"]:
             (self.workspace_dir / subdir).mkdir(exist_ok=True)
 
-        # Run preprocess script
-        # Note: some preprocess scripts spawn background servers (e.g. http.server)
-        # that inherit pipes, so we must not use communicate() which waits for EOF.
-        # Instead, use DEVNULL and wait with a timeout.
-        preprocess = self.task_dir / "preprocess" / "main.py"
-        if preprocess.exists():
-            proc = await asyncio.create_subprocess_exec(
-                "python3", str(preprocess),
-                "--agent_workspace", str(self.workspace_dir),
-                "--launch_time", self._launch_time,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                cwd=str(self.task_dir / "preprocess"),
-                env={**os.environ, **self._pg_env()},
-            )
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=30)
-                if proc.returncode != 0:
-                    print(f"[setup] Preprocess warning (rc={proc.returncode})", flush=True)
-            except asyncio.TimeoutError:
-                print("[setup] Preprocess timed out (30s), continuing anyway", flush=True)
+        await run_preprocess(
+            self.task_dir / "preprocess" / "main.py", self.workspace_dir,
+            self._session_dir / "preprocess.log", task=self.task_name,
+            session=self._db_name, launch_time=self._launch_time,
+            env={**os.environ, **self._pg_env()},
+        )
+        if self._http_fixture is not None:
+            self._http_fixture.rewrite_tree(self.workspace_dir)
+            self._http_fixture.check_ready()
 
         # Start MCP servers
         if needed_servers:
-            self._mcp_bridge = MCPBridge(needed_servers, str(self.workspace_dir), self._pg_env())
+            self._mcp_bridge = MCPBridge(
+                needed_servers, str(self.workspace_dir), self._pg_env(),
+                task_dir=str(self.task_dir),
+            )
             await self._mcp_bridge.start()
 
+    def _fixture_urls(self, value: Any) -> Any:
+        fixture = getattr(self, "_http_fixture", None)
+        return fixture.rewrite(value) if fixture is not None else value
+
+    def _session_agent_pids(self) -> list[int]:
+        """Live PIDs that run under this session, for pausing while the grader runs.
+
+        Every process this session starts for the agent — the MCP servers, the
+        commands the terminal MCP runs, and python_execute and whatever it
+        spawns — inherits ``PGDATABASE=<this session's db>`` in its environment
+        (``_pg_env``). The postgres backends do not (they inherit the
+        postmaster's environment), and neither does this worker, which serves
+        other sessions too. So a process of our own uid whose environment names
+        this session's database belongs to this session, wherever it has been
+        reparented. A process that replaced its own environment after exec is
+        the documented gap; it still cannot touch the read-only grader, and the
+        result path exists only for this grading.
+        """
+        if self._session_dir is None:
+            return []
+        marker = f"PGDATABASE={self._db_name}".encode()
+        euid = os.geteuid()
+        me = os.getpid()
+        found: list[int] = []
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            if pid == me:
+                continue
+            try:
+                if os.stat(f"/proc/{pid}").st_uid != euid:
+                    continue
+                environ = (Path("/proc") / entry / "environ").read_bytes()
+            except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+                continue
+            if marker in environ.split(b"\0"):
+                found.append(pid)
+        return found
+
+    def _pause_agent_processes(self) -> list[int]:
+        """Freeze this session's agent processes; return the PIDs actually stopped.
+
+        Rescan until no new process appears, so a process that forked between
+        the scan and the stop is caught on the next pass (a stopped process
+        cannot fork again).
+        """
+        paused: list[int] = []
+        seen: set[int] = set()
+        for _ in range(5):
+            pids = [pid for pid in self._session_agent_pids() if pid not in seen]
+            if not pids:
+                break
+            for pid in pids:
+                seen.add(pid)
+                try:
+                    os.kill(pid, SIGSTOP)
+                    paused.append(pid)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        return paused
+
+    @staticmethod
+    def _resume_processes(pids: Sequence[int]) -> None:
+        for pid in pids:
+            try:
+                os.kill(pid, SIGCONT)
+            except (ProcessLookupError, PermissionError):
+                pass
+
     def get_prompt(self) -> Sequence[TextBlock]:
-        parts = []
+        parts = [
+            f"Task launch time: {self._launch_time_display}.\n"
+            "Use this as the reference for today, now, and dates relative to "
+            "the task's launch time. The operating-system clock may differ; "
+            "it does not change the task's reference date."
+        ]
 
         # Read agent system prompt
         sys_prompt_path = self.task_dir / "docs" / "agent_system_prompt.md"
@@ -509,23 +1046,37 @@ class ToolathlonGym(Environment):
 
     def list_task_tools(self) -> ListToolsOutput:
         return ListToolsOutput(tools=[
-            ToolSpec(
-                name="get_tool_details",
-                description=(
-                    "Return the full input_schema and description for one MCP "
-                    "tool, looked up by its `server.tool_name` identifier "
-                    "(as listed in the system-prompt catalog)."
+            _with_tool_routing(
+                ToolSpec(
+                    name="get_tool_details",
+                    description=(
+                        "Return the full input_schema and description for one MCP "
+                        "tool, looked up by its `server.tool_name` identifier "
+                        "(as listed in the system-prompt catalog)."
+                    ),
+                    input_schema=GetToolDetailsInput.model_json_schema(),
                 ),
-                input_schema=GetToolDetailsInput.model_json_schema(),
+                capabilities=("tool.discover",),
+                invocation={"kind": "direct"},
             ),
-            ToolSpec(
-                name="call_tool",
-                description=(
-                    "Invoke an MCP tool. Pass the `server.tool_name` from the "
-                    "system-prompt catalog and an `arguments` object matching "
-                    "that tool's input_schema (fetch via get_tool_details)."
+            _with_tool_routing(
+                ToolSpec(
+                    name="call_tool",
+                    description=(
+                        "Invoke an MCP tool. Pass the `server.tool_name` from the "
+                        "system-prompt catalog and an `arguments` object matching "
+                        "that tool's input_schema (fetch via get_tool_details)."
+                    ),
+                    input_schema=CallToolInput.model_json_schema(),
                 ),
-                input_schema=CallToolInput.model_json_schema(),
+                capabilities=("tool.dispatch",),
+                invocation={
+                    "kind": "dispatcher",
+                    "name_argument": "name",
+                    "arguments_argument": "arguments",
+                    "discovery_tool": "get_tool_details",
+                    "targets": [],
+                },
             ),
         ])
 
@@ -543,11 +1094,9 @@ class ToolathlonGym(Environment):
         if mcp_tool_name in self._mcp_tool_names and self._mcp_bridge:
             try:
                 result_text = await self._mcp_bridge.call_tool(
-                    mcp_tool_name, input, server=explicit_server
+                    mcp_tool_name, self._fixture_urls(input), server=explicit_server
                 )
-                # Truncate very long outputs
-                if len(result_text) > 50000:
-                    result_text = result_text[:50000] + "\n... (output truncated)"
+                result_text = _safe_mcp_output(self._fixture_urls(result_text))
                 return RunToolOutput(RunToolSuccess(
                     output=ToolOutput(blocks=[TextBlock(text=result_text)])
                 ))
@@ -563,10 +1112,10 @@ class ToolathlonGym(Environment):
         """Return the full schema and description for one MCP tool."""
         entry = self._task_tool_by_name.get(params.name)
         if entry is None:
-            return ToolOutput(blocks=[TextBlock(text=(
-                f"Error: unknown tool '{params.name}'. Pass the exact "
+            raise ValueError(
+                f"Unknown catalog tool '{params.name}'. Pass the exact "
                 "`server.tool_name` shown in the system-prompt catalog."
-            ))])
+            )
         payload = {
             "name": entry["name"],
             "server": entry["server"],
@@ -578,34 +1127,43 @@ class ToolathlonGym(Environment):
     @tool(shared=False)
     async def call_tool(self, params: CallToolInput) -> ToolOutput:
         """Invoke an MCP tool by name, dispatching through the running bridge."""
-        if self._mcp_bridge is None:
-            return ToolOutput(blocks=[TextBlock(
-                text="Error: MCP bridge is not running for this task."
-            )])
-
         name = params.name
         entry = self._task_tool_by_name.get(name)
         if entry is None:
-            return ToolOutput(blocks=[TextBlock(text=(
-                f"Error: unknown tool '{name}'. Pass the exact "
+            raise ValueError(
+                f"Unknown catalog tool '{name}'. Pass the exact "
                 "`server.tool_name` shown in the system-prompt catalog."
-            ))])
+            )
+        if self._mcp_bridge is None:
+            raise RuntimeError("MCP bridge is not running for this task")
 
         try:
             result_text = await self._mcp_bridge.call_tool(
-                entry["bare_name"], dict(params.arguments), server=entry["server"]
+                entry["bare_name"], self._fixture_urls(dict(params.arguments)), server=entry["server"]
             )
-        except Exception as e:
-            return ToolOutput(blocks=[TextBlock(text=f"MCP tool error: {e}")])
+        except Exception as exc:
+            return _tool_error_output(
+                f"MCP catalog tool '{name}' failed: {exc}",
+                kind="mcp_tool_error",
+            )
 
-        if len(result_text) > 50000:
-            result_text = result_text[:50000] + "\n... (output truncated)"
+        result_text = _safe_mcp_output(self._fixture_urls(result_text))
         return ToolOutput(blocks=[TextBlock(text=result_text)])
 
     @tool
     async def claim_done(self) -> ToolOutput:
-        """Signal that the task is complete and trigger evaluation."""
-        eval_script = self.task_dir / "evaluation" / "main.py"
+        """Signal that the task is complete and trigger evaluation.
+
+        The grader runs from the image's read-only task tree
+        (``_source_task_dir``), never the session's writable copy, so the agent
+        cannot rewrite the grader it is scored by. The session supplies only
+        its workspace, its database (through the environment) and a fresh
+        result directory created here, outside the workspace, for this grading
+        alone. The agent's own processes are paused for the duration, so a
+        background job it left running cannot write the result file or anything
+        the grader reads while the grader runs.
+        """
+        eval_script = self._source_task_dir / "evaluation" / "main.py"
         if not eval_script.exists():
             return ToolOutput(
                 blocks=[TextBlock(text="No evaluation script found.")],
@@ -613,39 +1171,46 @@ class ToolathlonGym(Environment):
                 finished=True,
             )
 
-        res_log = self.workspace_dir / "eval_result.json"
-        groundtruth = self.task_dir / "groundtruth_workspace"
+        groundtruth = self._source_task_dir / "groundtruth_workspace"
+        result_dir = None
+        paused: list[int] = []
 
         try:
-            proc = await asyncio.create_subprocess_exec(
+            paused = self._pause_agent_processes()
+            # A new directory outside the agent's workspace: the reward can only
+            # come from a file written while this grader runs, never from an
+            # eval_result.json the agent left in its workspace.
+            result_dir = Path(tempfile.mkdtemp(prefix="grader-result-", dir=self._session_dir))
+            res_log = result_dir / GRADER_RESULT_FILE
+            proc = await run_task_process(
                 "python3", str(eval_script),
                 "--agent_workspace", str(self.workspace_dir),
                 "--groundtruth_workspace", str(groundtruth),
                 "--launch_time", self._launch_time,
                 "--res_log_file", str(res_log),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=str(self.task_dir / "evaluation"),
+                cwd=str(eval_script.parent),
                 env={**os.environ, **self._pg_env()},
+                timeout=GRADER_TIMEOUT_S,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-            output = stdout.decode() + stderr.decode()
+            output = proc.stdout + proc.stderr
 
             if proc.returncode == 0:
+                reward = _reward_for_evaluation(1.0, res_log, output)
                 return ToolOutput(
                     blocks=[TextBlock(text=f"PASS\n{output}")],
-                    reward=1.0,
+                    reward=reward,
                     finished=True,
                 )
             else:
+                reward = _reward_for_evaluation(0.0, res_log, output)
                 return ToolOutput(
                     blocks=[TextBlock(text=f"FAIL\n{output}")],
-                    reward=0.0,
+                    reward=reward,
                     finished=True,
                 )
         except asyncio.TimeoutError:
             return ToolOutput(
-                blocks=[TextBlock(text="Evaluation timed out after 120s")],
+                blocks=[TextBlock(text=f"Evaluation timed out after {GRADER_TIMEOUT_S}s")],
                 reward=0.0,
                 finished=True,
             )
@@ -655,24 +1220,35 @@ class ToolathlonGym(Environment):
                 reward=0.0,
                 finished=True,
             )
+        finally:
+            # The episode ends here, but resume anyway so teardown can close the
+            # MCP servers gracefully; its own cleanup reaps whatever remains.
+            self._resume_processes(paused)
+            if result_dir is not None:
+                shutil.rmtree(result_dir, ignore_errors=True)
 
     @tool
     async def python_execute(self, params: PythonExecuteInput) -> ToolOutput:
         """Execute Python code in the workspace and return stdout/stderr."""
-        code_file = self.workspace_dir / f"_exec_{uuid4().hex[:8]}.py"
-        code_file.write_text(params.code)
+        # Workspace listings must contain only task artifacts. A source file
+        # written there appears in its own os.listdir() output, then vanishes
+        # before the next call, sending agents after nonexistent artifacts.
+        scratch = tempfile.TemporaryDirectory(prefix="toolathlon-python-", dir=self.workspace_dir.parent)
+        code_file = Path(scratch.name) / "exec.py"
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "python3", str(code_file),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            code_file.write_text(self._fixture_urls(params.code), encoding="utf-8")
+            proc = await run_task_process(
+                "python3", "-c",
+                "import runpy, sys; script = sys.argv.pop(1); "
+                "sys.path[0] = sys.argv.pop(1); runpy.run_path(script, run_name='__main__')",
+                str(code_file), str(self.workspace_dir),
                 cwd=str(self.workspace_dir),
                 env={**os.environ, **self._pg_env()},
+                timeout=60,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-            output = stdout.decode()
-            errors = stderr.decode()
+            output = self._fixture_urls(proc.stdout)
+            errors = self._fixture_urls(proc.stderr)
             result = ""
             if output:
                 result += f"stdout:\n{output}\n"
@@ -680,18 +1256,45 @@ class ToolathlonGym(Environment):
                 result += f"stderr:\n{errors}\n"
             if not result:
                 result = "(no output)"
+            if proc.returncode != 0:
+                return _tool_error_output(
+                    f"Python exited with status {proc.returncode}.\n{result}",
+                    kind="nonzero_exit",
+                )
             return ToolOutput(blocks=[TextBlock(text=result)])
         except asyncio.TimeoutError:
-            return ToolOutput(blocks=[TextBlock(text="Execution timed out after 60s")])
+            return _tool_error_output(
+                "Python execution timed out after 60 seconds.",
+                kind="timeout",
+            )
         except Exception as e:
-            return ToolOutput(blocks=[TextBlock(text=f"Execution error: {e}")])
+            return _tool_error_output(
+                f"Python execution failed: {e}",
+                kind="execution_error",
+            )
         finally:
-            code_file.unlink(missing_ok=True)
+            scratch.cleanup()
 
     async def teardown(self):
+        failures = []
+        cancelled = None
         if self._mcp_bridge:
-            await self._mcp_bridge.close()
+            try:
+                await self._mcp_bridge.close()
+            except asyncio.CancelledError as exc:
+                # Rollout cancellation must still release the episode's
+                # fixture, files, and database before it propagates.
+                cancelled = exc
+            except Exception as exc:
+                failures.append(f"MCP cleanup: {exc}")
+        if self._http_fixture is not None:
+            try:
+                self._http_fixture.close()
+            except Exception as exc:
+                failures.append(f"HTTP fixture cleanup: {exc}")
         shutil.rmtree(self.workspace_dir, ignore_errors=True)
+        if self._session_dir is not None:
+            shutil.rmtree(self._session_dir, ignore_errors=True)
         # Drop the per-session DB. Best-effort: a leak just means the next
         # entrypoint.sh sweep will collect it.
         try:
@@ -700,6 +1303,10 @@ class ToolathlonGym(Environment):
             )
         except Exception as e:
             print(f"[teardown] DROP DATABASE {self._db_name} failed: {e}", flush=True)
+        if cancelled is not None:
+            raise cancelled
+        if failures:
+            raise RuntimeError("; ".join(failures))
 
     @classmethod
     def list_splits(cls) -> list[str]:
@@ -719,4 +1326,4 @@ class ToolathlonGym(Environment):
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    Server([ToolathlonGym]).run()
+    Server([ToolathlonGym]).run(port=_get_server_port())

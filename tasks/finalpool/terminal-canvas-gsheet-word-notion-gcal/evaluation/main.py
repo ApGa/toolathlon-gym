@@ -225,9 +225,10 @@ def check_reverse_validation(workspace):
         """)
         events = cur.fetchall()
         weekend_events = [e for e in events if e[2] in (0, 6)]
+        # Without advising events there is nothing to validate.
         check("No advising events on weekends",
-              len(weekend_events) == 0,
-              f"Found {len(weekend_events)} weekend advising events")
+              bool(events) and len(weekend_events) == 0,
+              f"Found {len(weekend_events)} weekend advising events" if events else "No advising events")
         cur.close(); conn.close()
     except Exception as e:
         check("Reverse validation", False, str(e))

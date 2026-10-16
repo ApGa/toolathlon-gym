@@ -1,10 +1,10 @@
 """Evaluation script for canvas-scholarly-curriculum-excel-notion."""
+import argparse
+import json
 import os
-import argparse, json, os, sys
+import sys
 import openpyxl
-
-def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
-    return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
+from grader_helpers import records, close, number, text
 
 
 DB_CONFIG = {
@@ -26,91 +26,86 @@ def check(name, condition, detail=""):
         detail_str = str(detail)[:200] if detail else ""
         print(f"  [FAIL] {name}: {detail_str}")
 
-def safe_float(val, default=None):
-    try:
-        if val is None: return default
-        return float(str(val).replace(",", "").replace("%", "").replace("$", "").strip())
-    except (ValueError, TypeError):
-        return default
 
 def get_conn():
     import psycopg2
     return psycopg2.connect(**DB_CONFIG)
 
+def check_curriculum(wb, courses, papers):
+    course_rows = records(wb, "Current_Courses", ("course_name", "course_code", "enrollment_count", "avg_score"), check)
+    research = records(wb, "Research_Trends", ("paper_title", "topic_area", "year", "citations", "relevance_to_curriculum"), check)
+    gaps = records(wb, "Gap_Analysis", ("metric", "value"), check)
+    by_code = {text(r["course_code"]): r for r in course_rows}
+    check("All offered courses represented once", len(course_rows) == len(courses)
+          and set(by_code) == {text(c[1]) for c in courses})
+    for name, code, enrollment, score in courses:
+        row = by_code.get(text(code), {})
+        check(f"Course {code} values", text(row.get("course_name")) == text(name)
+              and close(row.get("enrollment_count"), enrollment, 0)
+              and (close(row.get("avg_score"), score, .06) if score is not None
+                   else row.get("avg_score") in (None, "", "N/A")))
+    names = [text(r["course_name"]) for r in course_rows]
+    check("Courses sorted by name", names == sorted(names))
+    paper_lookup = {}
+    for title, year, citations in papers:
+        paper_lookup.setdefault(text(title), []).append((year, citations))
+    titles = [text(r["paper_title"]) for r in research]
+    check("Research contains distinct available papers", bool(research)
+          and len(titles) == len(set(titles)) and all(t in paper_lookup for t in titles))
+    for row in research:
+        expected = paper_lookup.get(text(row["paper_title"]))
+        if expected is None:
+            continue
+        check(f"Paper metadata: {row['paper_title']}",
+              any(close(row["year"], year, 0) and close(row["citations"], citations, 0)
+                  for year, citations in expected) and bool(text(row["topic_area"]))
+              and text(row["relevance_to_curriculum"]) in {"high", "medium", "low"})
+    citations = [number(r["citations"]) for r in research]
+    check("Research sorted by citations", all(c is not None for c in citations)
+          and citations == sorted(citations, key=lambda c: c if c is not None else -1, reverse=True))
+    metrics = {text(r["metric"]): r["value"] for r in gaps}
+    for name, expected in [("total_courses", len(courses)), ("papers_reviewed", len(research)),
+                           ("high_relevance_papers", sum(text(r["relevance_to_curriculum"]) == "high" for r in research))]:
+        check(f"Gap metric {name}", close(metrics.get(name), expected, 0))
+    # Coverage and topical relevance are judgments; validate the stated range
+    # and required output rather than insisting on placeholder prose.
+    coverage = number(metrics.get("curriculum_coverage_pct"))
+    check("Curriculum coverage is a percentage", coverage is not None and 0 <= coverage <= 100)
+    check("Top gap area provided", bool(text(metrics.get("top_gap_area"))))
+
+
 def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_file):
     global PASS_COUNT, FAIL_COUNT
-    PASS_COUNT = 0
-    FAIL_COUNT = 0
-
-    # Check Curriculum_Review_Report.xlsx
-    excel_path = os.path.join(agent_workspace, "Curriculum_Review_Report.xlsx")
-    check("Curriculum_Review_Report.xlsx exists", os.path.exists(excel_path))
-    if os.path.exists(excel_path):
-        wb = openpyxl.load_workbook(excel_path)
-        gt_path = os.path.join(groundtruth_workspace, "Curriculum_Review_Report.xlsx")
-        gt_wb = openpyxl.load_workbook(gt_path) if os.path.exists(gt_path) else None
-
-        if gt_wb:
-            for sheet_name in gt_wb.sheetnames:
-                check(f"{sheet_name} sheet exists", sheet_name in wb.sheetnames)
-                if sheet_name in wb.sheetnames:
-                    ws = wb[sheet_name]
-                    gt_ws = gt_wb[sheet_name]
-                    # Check headers
-                    gt_headers = [str(c.value).strip().lower() if c.value else "" for c in gt_ws[1]]
-                    headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-                    for h in gt_headers:
-                        if h:
-                            check(f"{sheet_name} has {h} column", h in headers, f"headers: {headers[:10]}")
-                    # Check row count
-                    gt_rows = list(gt_ws.iter_rows(min_row=2, values_only=True))
-                    data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-                    min_rows = max(1, len(gt_rows) - 2)
-                    check(f"{sheet_name} has >= {min_rows} data rows", len(data_rows) >= min_rows, f"got {len(data_rows)}")
-
-                    # Cell value comparison against groundtruth
-                    header_map = {h: i for i, h in enumerate(headers)}
-                    gt_header_map = {h: i for i, h in enumerate(gt_headers)}
-                    for ri in range(min(3, len(gt_rows), len(data_rows))):
-                        gt_row = gt_rows[ri]
-                        agent_row = data_rows[ri]
-                        for ci, gt_h in enumerate(gt_headers):
-                            if not gt_h or ci >= len(gt_row):
-                                continue
-                            gv = gt_row[ci]
-                            agent_ci = header_map.get(gt_h)
-                            if agent_ci is None or agent_ci >= len(agent_row):
-                                continue
-                            av = agent_row[agent_ci]
-                            gf = safe_float(gv)
-                            af = safe_float(av)
-                            if gf is not None and af is not None:
-                                tol = max(0.5, abs(gf) * 0.15)
-                                check(f"{sheet_name} R{ri+2} {gt_h} ~{gf:.1f}",
-                                      abs(gf - af) <= tol, f"got {af}")
-                            elif gv is not None and av is not None:
-                                gs = str(gv).strip().lower()
-                                avs = str(av).strip().lower()
-                                if gs:
-                                    check(f"{sheet_name} R{ri+2} {gt_h} text",
-                                          gs == avs or gs in avs or avs in gs,
-                                          f"expected {gs[:50]}, got {avs[:50]}")
-
-    # Check Python script exists (terminal usage)
-    py_files = [f for f in os.listdir(agent_workspace) if f.endswith(".py")]
-    check("Python analysis script exists", len(py_files) >= 1, f"found: {py_files}")
-
-    # Database checks
+    PASS_COUNT = FAIL_COUNT = 0
+    path = os.path.join(agent_workspace, "Curriculum_Review_Report.xlsx")
+    check("Curriculum_Review_Report.xlsx exists", os.path.isfile(path))
+    conn = get_conn()
     try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM notion.pages WHERE archived = false")
-        page_count = cur.fetchone()[0]
-        check("Notion page created", page_count >= 1, f"page count: {page_count}")
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT c.name, c.course_code, c.total_students, AVG(s.score)
+                FROM canvas.courses c LEFT JOIN canvas.assignments a ON a.course_id = c.id
+                LEFT JOIN canvas.submissions s ON s.assignment_id = a.id
+                WHERE c.workflow_state = 'available'
+                GROUP BY c.id, c.name, c.course_code, c.total_students ORDER BY c.name
+            """)
+            courses = cur.fetchall()
+            cur.execute("""
+                SELECT title, pub_year, citation_count FROM scholarly.scholar_papers
+                UNION ALL SELECT title, EXTRACT(YEAR FROM published), 0 FROM scholarly.arxiv_papers
+            """)
+            papers = cur.fetchall()
+            if os.path.isfile(path):
+                wb = openpyxl.load_workbook(path, data_only=True)
+                try:
+                    check_curriculum(wb, courses, papers)
+                finally:
+                    wb.close()
+            cur.execute("SELECT COUNT(*) FROM notion.pages WHERE archived = false AND properties::text ILIKE %s", ("%Curriculum Innovation Tracker%",))
+            check("Curriculum Innovation Tracker created", cur.fetchone()[0] >= 1)
+    finally:
         conn.close()
-    except Exception as e:
-        check("DB checks", False, str(e))
-
+    check("curriculum_reviewer.py exists", os.path.isfile(os.path.join(agent_workspace, "curriculum_reviewer.py")))
     return FAIL_COUNT == 0, f"Passed {PASS_COUNT}/{PASS_COUNT + FAIL_COUNT} checks"
 
 def main():

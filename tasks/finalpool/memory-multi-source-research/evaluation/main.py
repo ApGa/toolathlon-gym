@@ -205,24 +205,40 @@ def check_word(agent_workspace):
           f"Found {paper_mention_count} paper mentions")
 
 
+def is_empty_memory(content):
+    """True for memory.json text that holds no entity, relation or note.
+
+    The initial workspace ships an empty graph, and the memory server writes
+    the file back, reformatted, after any call that adds nothing, so neither
+    is memory the agent recorded.
+    """
+    if not content:
+        return True
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return False
+    return not any(data.values()) if isinstance(data, dict) else not data
+
+
 def check_memory(agent_workspace):
     """Check that memory.json has research tracking entities."""
     print("\n=== Checking Memory ===")
 
     memory_path = os.path.join(agent_workspace, "memory", "memory.json")
-    if not os.path.isfile(memory_path):
-        check("memory.json exists", False, f"Not found: {memory_path}")
+    content = ""
+    if os.path.isfile(memory_path):
+        with open(memory_path, "r") as f:
+            content = f.read().strip()
+
+    # The initial workspace already ships an empty memory.json, so the file
+    # only counts once the agent has recorded something in it.
+    if is_empty_memory(content):
+        check("memory.json exists", False, f"Missing or empty: {memory_path}")
+        check("Memory has content", False, "memory.json holds no entities")
         return
 
     check("memory.json exists", True)
-
-    with open(memory_path, "r") as f:
-        content = f.read().strip()
-
-    if not content or content in ("{}", '{"entities": [], "relations": []}'):
-        check("Memory has content", False, "memory.json is empty or unchanged")
-        return
-
     check("Memory has content", True)
 
     try:

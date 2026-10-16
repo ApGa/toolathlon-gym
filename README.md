@@ -19,6 +19,86 @@ Toolathlon Gym is an ORS environment for evaluating multi-tool coordination capa
 
 Each task runs inside a Docker container with PostgreSQL, 25 MCP server implementations, Node.js 22, and Python 3.12. The ORS server runs alongside all services in a single container.
 
+## Self-Hosting
+
+Run the environment server on the default port:
+
+```bash
+docker run --rm -p 8080:8080 ghcr.io/apga/openreward-toolathlon-gym:latest
+```
+
+To use a different in-container port, set `OPENREWARD_PORT` and publish the same container port:
+
+```bash
+docker run --rm \
+  -e OPENREWARD_PORT=18080 \
+  -p 18080:18080 \
+  ghcr.io/apga/openreward-toolathlon-gym:latest
+```
+
+`OPENREWARD_PORT` is preferred over the generic `PORT` variable. If `OPENREWARD_PORT` is unset, the server falls back to `PORT`, then `8080`.
+
+For higher rollout concurrency, set the number of in-container ORS workers:
+
+```bash
+docker run --rm \
+  -e OPENREWARD_WORKERS=64 \
+  -e OPENREWARD_PG_MAX_CONNECTIONS=2000 \
+  -p 8080:8080 \
+  ghcr.io/apga/openreward-toolathlon-gym:latest
+```
+
+If `OPENREWARD_WORKERS` is unset, the container defaults to the host CPU count with a minimum of 4 workers. There is no fixed upper cap; make sure `OPENREWARD_PG_MAX_CONNECTIONS`, CPU, and memory are sized for the number of concurrent sessions.
+
+### Concurrent task setup and HTTP fixtures
+
+Each episode copies its task into a private, writable temporary directory. The
+127 tasks with local HTTP data declare an `http_fixture` in `task_config.json`:
+
+```json
+"http_fixture": {
+  "port": 30180,
+  "source": "files/mock_pages.tar.gz",
+  "root": "mock_pages"
+}
+```
+
+`port` identifies the original URLs in the task assets. The environment serves
+each episode's private fixture on an OS-assigned loopback port and updates its
+instructions, scripts, text inputs, PDFs, Office documents, and fixture links to
+use that endpoint. Legacy URLs in tool arguments and results are also translated.
+The endpoint stays alive until the episode is torn down. Preprocessors only
+prepare task data; they must not start servers or kill processes on fixed ports.
+
+This works with read-only task assets and an unprivileged container user,
+including Apptainer and Enroot deployments. Concurrent episodes can share the
+host network without overwriting or terminating each other's fixtures. The
+server, MCP tools, and Python execution must share a network namespace and have
+access to writable temporary and workspace directories.
+
+Setup checks that the fixture serves its actual data. A failed or timed-out
+preprocessor rejects the episode setup and cleans up its resources. The server
+logs the task, session, and the last 8 KiB of subprocess output. The preprocessing
+timeout is 30 seconds; this is separate from the agent's rollout time limit.
+
+Run the regression suite with Python 3.12 and the server dependencies installed:
+
+```bash
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests -v
+```
+
+Tasks that require an email sender provide an `email_config.json` account file.
+The emails MCP server loads this file from the episode's private task directory,
+so simultaneous episodes retain their own sender identities. Tasks without an
+account file use the email server's default account. These are PostgreSQL-backed
+simulated accounts; no external SMTP connection is made.
+
+The Notion evaluator integration tests also run when `TOOLATHLON_TEST_PG_DSN`
+points to a disposable PostgreSQL database. They use the image's seed schema
+inside transactions that are rolled back after each test. CI supplies this
+database automatically.
+
 ## License
 
 [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0).
@@ -33,7 +113,20 @@ Tasks require coordinating 4-8 MCP servers per task across domains including You
 
 ## Reward Structure
 
-This is a multi-turn environment with script-based validation. The agent uses MCP tools and built-in tools to complete tasks, then calls `claim_done` to run the evaluation script. The reward is binary: 1.0 if all checks pass, 0.0 otherwise.
+This is a multi-turn environment with script-based validation. The agent uses MCP tools and built-in tools to complete tasks, then calls `claim_done` to run the evaluation script. By default, the reward is binary: 1.0 if the grader passes, 0.0 otherwise.
+
+To return fractional rewards from grader check counts where available, set:
+
+```bash
+docker run --rm \
+  -e OPENREWARD_REWARD_MODE=partial \
+  -p 8080:8080 \
+  ghcr.io/apga/openreward-toolathlon-gym:latest
+```
+
+Partial mode reads the grader result log or a stdout summary such as `total_passed/total_checks`, `passed/failed`, or `Overall: N/M checks passed`. When a grader prints more than one summary line, the server takes the last one it writes, so text it echoes from the agent's own work is not read as the score. If a grader only reports pass/fail, the server falls back to the binary reward for that task.
+
+The grader is run from the image's read-only task tree, never the session's writable copy, so the agent cannot rewrite the script it is scored by. The session supplies only its workspace, its database and a fresh result-log directory created for each grading outside the workspace, so an `eval_result.json` the agent writes is never read. While the grader runs, the session's own processes are paused, so a background job the agent left running cannot write the result file or anything the grader reads. A process that detaches and replaces its environment is the one case the server cannot attribute to the session; the read-only grader and the per-grading result path still hold.
 
 ## Data
 
@@ -55,6 +148,28 @@ Each task exposes tools from its required MCP servers. Examples include `read_fi
 ## Time Horizon
 
 Multi-turn. Agents read task instructions, use MCP tools to gather data, create files, query databases, and perform analysis, then call `claim_done` for evaluation.
+
+The prompt always includes the launch time passed to task graders. Relative
+dates use that reference even when `OPENREWARD_FROZEN_DATE` differs from the
+machine's clock. The Fireship technology report is graded against the seeded
+video database and the report's topic aggregates, rather than the illustrative
+reference workbook.
+
+Python execution has a 60-second deadline and evaluation has a 120-second
+deadline. Timeout or cancellation kills the invocation's process group,
+including its children. Captured stdout and stderr are each limited to 1 MiB;
+larger results should be written to workspace files.
+
+PDF tools replace unpaired Unicode surrogates in text, metadata, and error
+responses so an invalid PDF string cannot terminate the MCP JSON transport.
+Valid Unicode, including supplementary characters, is preserved.
+
+Browser tools retain the most recent 1000 console messages and network
+requests per tab. Console text is limited to 2000 characters, and snapshots
+consume up to 50 new console messages without repeating them on later calls.
+The PBS cleanup layer uses `task_process.process_group_is_alive` to distinguish
+exited zombie processes from live members; live process groups still require
+cleanup and verification.
 
 ## Environment Difficulty
 
@@ -78,4 +193,3 @@ Agents operate within Docker containers with isolated PostgreSQL databases and p
   url       = {https://github.com/eigent-ai/toolathlon_gym}
 }
 ```
-

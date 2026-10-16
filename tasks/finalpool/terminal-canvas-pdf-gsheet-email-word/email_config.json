@@ -1,1 +1,5 @@
-{"email": "analyst@university.edu", "name": "Workload Analyst"}
+{
+  "email": "analyst@university.edu",
+  "name": "Workload Analyst",
+  "password": "unused"
+}

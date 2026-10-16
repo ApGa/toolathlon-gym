@@ -1,11 +1,11 @@
-"""Preprocess for terminal-sf-fetch-excel-notion-gcal.
-Sets up mock page at port 30185. Clears notion and gcal. Injects noise. SF is read-only."""
+"""Prepare task data for terminal-sf-fetch-excel-notion-gcal.
+
+HTTP fixture lifecycle is managed by the environment server (task_config.json).
+"""
 import argparse
 import asyncio
 import glob as globmod
 import os
-import shutil
-import tarfile
 import uuid
 
 import psycopg2
@@ -17,43 +17,11 @@ DB_CONFIG = {
 }
 
 
-async def run_command(cmd: str):
-    proc = await asyncio.create_subprocess_shell(
-        cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    await proc.wait()
-
-
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", type=str, required=False)
     parser.add_argument("--launch_time", type=str, required=False)
     args = parser.parse_args()
-
-    task_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    files_dir = os.path.join(task_root, "files")
-
-    # 1. Set up mock dashboard page
-    print("Setting up mock SLA benchmark dashboard...")
-    tmp_dir = os.path.join(task_root, "tmp")
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    tar_path = os.path.join(files_dir, "mock_pages.tar.gz")
-    with tarfile.open(tar_path, "r:gz") as tar:
-        tar.extractall(path=tmp_dir)
-    print(f"  -> Extracted {tar_path} to {tmp_dir}")
-
-    mock_dir = os.path.join(tmp_dir, "mock_pages")
-    port = 30185
-    await run_command(f"kill -9 $(lsof -ti:{port}) 2>/dev/null")
-    await asyncio.sleep(0.5)
-    await asyncio.create_subprocess_shell(
-        f"nohup python3 -m http.server {port} --directory {mock_dir} "
-        f"> {mock_dir}/server.log 2>&1 &"
-    )
-    await asyncio.sleep(1)
-    print(f"  -> Mock dashboard running at http://localhost:{port}")
 
     # 2. Clear notion and gcal, inject noise
     conn = psycopg2.connect(**DB_CONFIG)

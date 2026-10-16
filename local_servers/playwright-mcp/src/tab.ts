@@ -36,6 +36,11 @@ export type TabEventsInterface = {
   [TabEvents.modalState]: [modalState: ModalState];
 };
 
+const MAX_CONSOLE_MESSAGES = 1000;
+const MAX_RECENT_CONSOLE_MESSAGES = 50;
+const MAX_CONSOLE_TEXT_LENGTH = 2000;
+const MAX_NETWORK_REQUESTS = 1000;
+
 export class Tab extends EventEmitter<TabEventsInterface> {
   readonly context: Context;
   readonly page: playwright.Page;
@@ -60,8 +65,17 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     this._snapshotSpanSize = context.config.spanSize || 2000;
     page.on('console', event => this._handleConsoleMessage(messageToConsoleMessage(event)));
     page.on('pageerror', error => this._handleConsoleMessage(pageErrorToConsoleMessage(error)));
-    page.on('request', request => this._requests.set(request, null));
-    page.on('response', response => this._requests.set(response.request(), response));
+    page.on('request', request => {
+      this._requests.set(request, null);
+      if (this._requests.size > MAX_NETWORK_REQUESTS)
+        this._requests.delete(this._requests.keys().next().value!);
+    });
+    page.on('response', response => {
+      // A late response must not resurrect a request evicted by the limit or
+      // cleared on navigation.
+      if (this._requests.has(response.request()))
+        this._requests.set(response.request(), response);
+    });
     page.on('close', () => this._onClose());
     page.on('filechooser', chooser => {
       this.setModalState({
@@ -330,7 +344,11 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
   private _handleConsoleMessage(message: ConsoleMessage) {
     this._consoleMessages.push(message);
+    if (this._consoleMessages.length > MAX_CONSOLE_MESSAGES)
+      this._consoleMessages.shift();
     this._recentConsoleMessages.push(message);
+    if (this._recentConsoleMessages.length > MAX_RECENT_CONSOLE_MESSAGES)
+      this._recentConsoleMessages.shift();
   }
 
   private _onClose() {
@@ -386,7 +404,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _takeRecentConsoleMarkdown(): string[] {
     if (!this._recentConsoleMessages.length)
       return [];
-    const result = this._recentConsoleMessages.map(message => {
+    const result = this._recentConsoleMessages.splice(0).map(message => {
       return `- ${trim(message.toString(), 100)}`;
     });
     return [`### New console messages`, ...result, ''];
@@ -551,25 +569,27 @@ export type ConsoleMessage = {
 };
 
 function messageToConsoleMessage(message: playwright.ConsoleMessage): ConsoleMessage {
+  // Retaining the protocol object in a closure also retains its JS handles.
+  // Copy bounded text while processing the event, not when returning a tool
+  // response minutes later.
+  const type = message.type();
+  const text = trim(message.text(), MAX_CONSOLE_TEXT_LENGTH);
+  const location = message.location();
+  const rendered = `[${type.toUpperCase()}] ${text} @ ${trim(location.url, MAX_CONSOLE_TEXT_LENGTH)}:${location.lineNumber}`;
   return {
-    type: message.type(),
-    text: message.text(),
-    toString: () => `[${message.type().toUpperCase()}] ${message.text()} @ ${message.location().url}:${message.location().lineNumber}`,
+    type,
+    text,
+    toString: () => rendered,
   };
 }
 
 function pageErrorToConsoleMessage(errorOrValue: Error | any): ConsoleMessage {
-  if (errorOrValue instanceof Error) {
-    return {
-      type: undefined,
-      text: errorOrValue.message,
-      toString: () => errorOrValue.stack || errorOrValue.message,
-    };
-  }
+  const text = trim(errorOrValue instanceof Error ? errorOrValue.message : String(errorOrValue), MAX_CONSOLE_TEXT_LENGTH);
+  const rendered = trim(errorOrValue instanceof Error ? errorOrValue.stack || errorOrValue.message : text, MAX_CONSOLE_TEXT_LENGTH);
   return {
     type: undefined,
-    text: String(errorOrValue),
-    toString: () => String(errorOrValue),
+    text,
+    toString: () => rendered,
   };
 }
 

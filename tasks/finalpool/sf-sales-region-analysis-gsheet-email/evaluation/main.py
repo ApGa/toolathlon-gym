@@ -196,8 +196,7 @@ def check_word(agent_workspace):
             if kw not in text:
                 errors.append(f"Regional_Summary.docx missing keyword: {kw}")
     except ImportError:
-        if os.path.getsize(docx_path) < 100:
-            errors.append("Regional_Summary.docx too small")
+        errors.append("python-docx is not installed, so Regional_Summary.docx cannot be checked")
     except Exception as e:
         errors.append(f"Error reading Regional_Summary.docx: {e}")
     return errors

@@ -52,9 +52,7 @@ def check_word_doc(agent_workspace):
         import docx
         doc = docx.Document(docx_path)
     except ImportError:
-        # Fallback: check file size
-        size = os.path.getsize(docx_path)
-        record("Word doc is non-empty (>5KB)", size > 5000, f"Size: {size} bytes")
+        record("python-docx available", False, "python-docx is not installed, so the Word document cannot be checked")
         return
     except Exception as e:
         record("Word doc readable", False, str(e))
@@ -116,13 +114,14 @@ def check_gcal():
     cur.close()
     conn.close()
 
-    # Expect at least 2 total events in April (Lab Meeting preloaded + at least 1 new)
-    record("GCal has events in April 2026 (at least preloaded Lab Meeting)",
-           len(events) >= 1,
+    # The preloaded Lab Meeting is input data; the agent adds the seminar and
+    # the review session.
+    new_events = [e for e in events if "lab meeting" not in (e[0] or "").lower()]
+    record("GCal has >= 2 agent-created events in April 2026",
+           len(new_events) >= 2,
            f"Found {len(events)} events: {[e[0] for e in events]}")
 
     # Check if agent added any seminar/survey/review events
-    new_events = [e for e in events if "lab meeting" not in (e[0] or "").lower()]
     summaries = " ".join(e[0] or "" for e in events).lower()
     has_seminar = "seminar" in summaries or "survey" in summaries or "science" in summaries or "review" in summaries
     record("GCal has >= 1 seminar or review event added by agent", len(new_events) >= 1 and has_seminar,

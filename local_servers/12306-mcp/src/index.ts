@@ -33,6 +33,19 @@ const pool = new Pool({
 });
 pool.on('error', () => { /* swallow idle connection errors */ });
 
+// "Now", with an optional freeze. The seeded train data is keyed to fixed
+// dates (e.g. 2026-03-10) and `checkDate` rejects anything before today, so
+// once real wall-clock drifts past the seed the rail tasks become unsolvable.
+// Setting OPENREWARD_FROZEN_DATE=YYYY-MM-DD pins "today" to the benchmark's
+// authoring date so date validation and get-current-date stay reproducible.
+function currentNow(): Date {
+    const frozen = process.env.OPENREWARD_FROZEN_DATE;
+    if (frozen && /^\d{4}-\d{2}-\d{2}/.test(frozen)) {
+        return new Date(`${frozen.slice(0, 10)}T12:00:00+08:00`);
+    }
+    return new Date();
+}
+
 // ---------------------------------------------------------------------------
 // Station dictionaries (loaded from PostgreSQL at startup)
 // ---------------------------------------------------------------------------
@@ -173,7 +186,7 @@ function filterTicketsInfo(
 }
 
 function checkDate(date: string): boolean {
-    const nowInShanghai = toZonedTime(new Date(), 'Asia/Shanghai');
+    const nowInShanghai = toZonedTime(currentNow(), 'Asia/Shanghai');
     nowInShanghai.setHours(0, 0, 0, 0);
     const inputDate = toZonedTime(new Date(date), 'Asia/Shanghai');
     inputDate.setHours(0, 0, 0, 0);
@@ -250,7 +263,7 @@ server.tool(
     '获取当前日期，以上海时区（Asia/Shanghai, UTC+8）为准，返回格式为 "yyyy-MM-dd"。主要用于解析用户提到的相对日期（如“明天”、“下周三”），为其他需要日期的接口提供准确的日期输入。',
     {},
     async () => {
-        const nowInShanghai = toZonedTime(new Date(), 'Asia/Shanghai');
+        const nowInShanghai = toZonedTime(currentNow(), 'Asia/Shanghai');
         return { content: [{ type: 'text', text: format(nowInShanghai, 'yyyy-MM-dd') }] };
     }
 );

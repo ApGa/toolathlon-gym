@@ -232,8 +232,14 @@ def check_reverse_validation(workspace):
               AND EXTRACT(DOW FROM start_datetime) IN (0, 6)
         """)
         weekend_count = cur.fetchone()[0]
-        check("No review meetings on weekends", weekend_count == 0,
-              f"Found {weekend_count} weekend events")
+        # Without review meetings there is nothing to validate.
+        cur.execute("""
+            SELECT COUNT(*) FROM gcal.events
+            WHERE lower(summary) LIKE '%%salary review%%' OR lower(summary) LIKE '%%review meeting%%'
+        """)
+        event_count = cur.fetchone()[0]
+        check("No review meetings on weekends", event_count > 0 and weekend_count == 0,
+              f"Found {weekend_count} weekend events" if event_count else "No review meetings")
         cur.close()
         conn.close()
     except Exception:

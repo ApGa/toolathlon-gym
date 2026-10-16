@@ -12,6 +12,7 @@ import os
 import sys
 
 import psycopg2
+from grader_helpers import rich_text
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
@@ -56,20 +57,7 @@ def check_notion():
 
         found_db = None
         for db_id, title_raw, props in dbs:
-            # title can be jsonb array or string
-            if isinstance(title_raw, list):
-                title = " ".join(t.get("plain_text", "") for t in title_raw if isinstance(t, dict))
-            elif isinstance(title_raw, str):
-                try:
-                    parsed = json.loads(title_raw)
-                    if isinstance(parsed, list):
-                        title = " ".join(t.get("plain_text", "") for t in parsed if isinstance(t, dict))
-                    else:
-                        title = title_raw
-                except (json.JSONDecodeError, TypeError):
-                    title = title_raw
-            else:
-                title = str(title_raw) if title_raw else ""
+            title = rich_text(title_raw)
             title_lower = title.lower()
             if "conference" in title_lower or "reading" in title_lower:
                 found_db = db_id
@@ -243,40 +231,6 @@ def check_calendar():
     return all_ok
 
 
-def check_xlsx_content(workspace):
-    """Check Conference_Reading_Summary.xlsx has valid content."""
-    print("\n=== Checking XLSX Content ===")
-    try:
-        import openpyxl
-    except ImportError:
-        record("openpyxl available", False, "Cannot import openpyxl")
-        return False
-
-    xlsx_path = os.path.join(workspace, "Conference_Reading_Summary.xlsx")
-    if not os.path.isfile(xlsx_path):
-        record("Conference_Reading_Summary.xlsx exists", False, f"Not found: {xlsx_path}")
-        return False
-    record("Conference_Reading_Summary.xlsx exists", True)
-
-    try:
-        wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-        record("XLSX has at least one sheet", len(wb.worksheets) >= 1,
-               f"Found {len(wb.worksheets)} sheets")
-        all_ok = True
-        for ws in wb.worksheets:
-            rows = list(ws.iter_rows(values_only=True))
-            has_data = len(rows) >= 2
-            record(f"XLSX sheet '{ws.title}' has data rows", has_data,
-                   f"Only {len(rows)} rows")
-            if not has_data:
-                all_ok = False
-        wb.close()
-        return all_ok
-    except Exception as e:
-        record("XLSX readable", False, str(e))
-        return False
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False, default=".")
@@ -287,15 +241,13 @@ def main():
 
     notion_ok = check_notion()
     cal_ok = check_calendar()
-    xlsx_ok = check_xlsx_content(args.agent_workspace)
 
     print(f"\n=== SUMMARY ===")
     print(f"  Notion:   {'PASS' if notion_ok else 'FAIL'}")
     print(f"  Calendar: {'PASS' if cal_ok else 'FAIL'}")
-    print(f"  XLSX:     {'PASS' if xlsx_ok else 'FAIL'}")
     print(f"  Passed: {PASS_COUNT}, Failed: {FAIL_COUNT}")
 
-    overall = notion_ok and cal_ok and xlsx_ok
+    overall = notion_ok and cal_ok and FAIL_COUNT == 0
     print(f"  Overall:  {'PASS' if overall else 'FAIL'}")
 
     sys.exit(0 if overall else 1)

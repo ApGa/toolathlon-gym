@@ -394,14 +394,22 @@ def check_reverse_validation(gt):
             "newsletter@company.com",
             "finance@company.com",
         ]
+        # Without the audit e-mails there is nothing to validate. Preprocess
+        # injects inbound mail to product_team@, so only sent mail counts.
+        cur.execute("""
+            SELECT COUNT(*) FROM email.messages
+            WHERE folder_id IN (SELECT id FROM email.folders WHERE LOWER(name) LIKE '%%sent%%')
+              AND subject ILIKE '%%support quality%%'
+        """)
+        sent = cur.fetchone()[0]
         for addr in noise_recipients:
             cur.execute(
                 "SELECT COUNT(*) FROM email.messages WHERE to_addr::text ILIKE %s",
                 (f"%{addr}%",),
             )
             cnt = cur.fetchone()[0]
-            check(f"No email sent to noise recipient {addr}", cnt == 0,
-                  f"Found {cnt} emails to {addr}")
+            check(f"No email sent to noise recipient {addr}", sent > 0 and cnt == 0,
+                  f"Found {cnt} emails to {addr}" if sent else "No audit e-mail was sent")
     except Exception as e:
         check("Reverse validation", False, str(e))
     finally:

@@ -153,8 +153,7 @@ def main():
             if len(_missing) == len(_kws):
                 all_errors.append(f"Agent_Review.docx missing expected keywords: {_missing}")
         except ImportError:
-            if os.path.getsize(docx_path) < 100:
-                all_errors.append("Agent_Review.docx too small")
+            all_errors.append("python-docx is not installed, so Agent_Review.docx cannot be checked")
         except Exception as _e:
             all_errors.append(f"Error reading Agent_Review.docx: {_e}")
 

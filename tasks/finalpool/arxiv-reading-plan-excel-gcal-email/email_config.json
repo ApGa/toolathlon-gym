@@ -1,1 +1,5 @@
-{"email": "coordinator@lab.example.com", "name": "Reading Group Coordinator"}
+{
+  "email": "coordinator@lab.example.com",
+  "name": "Reading Group Coordinator",
+  "password": "unused"
+}

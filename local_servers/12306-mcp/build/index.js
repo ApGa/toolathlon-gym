@@ -20,6 +20,14 @@ const pool = new Pool({
     idleTimeoutMillis: 10000,
 });
 pool.on('error', () => { });
+// OPENREWARD_FROZEN_DATE pins "today" so seeded-date rail tasks stay solvable.
+function currentNow() {
+    const frozen = process.env.OPENREWARD_FROZEN_DATE;
+    if (frozen && /^\d{4}-\d{2}-\d{2}/.test(frozen)) {
+        return new Date(`${frozen.slice(0, 10)}T12:00:00+08:00`);
+    }
+    return new Date();
+}
 // ---------------------------------------------------------------------------
 // Station dictionaries (loaded from PostgreSQL at startup)
 // ---------------------------------------------------------------------------
@@ -155,7 +163,7 @@ function filterTicketsInfo(tickets, trainFilterFlags, earliestStartTime = 0, lat
     return limitedNum > 0 ? result.slice(0, limitedNum) : result;
 }
 function checkDate(date) {
-    const nowInShanghai = toZonedTime(new Date(), 'Asia/Shanghai');
+    const nowInShanghai = toZonedTime(currentNow(), 'Asia/Shanghai');
     nowInShanghai.setHours(0, 0, 0, 0);
     const inputDate = toZonedTime(new Date(date), 'Asia/Shanghai');
     inputDate.setHours(0, 0, 0, 0);
@@ -217,7 +225,7 @@ server.resource('stations', 'data://all-stations', async (uri) => ({
     contents: [{ uri: uri.href, text: JSON.stringify(STATIONS) }],
 }));
 server.tool('get-current-date', '获取当前日期（上海时区，格式 yyyy-MM-dd）。', {}, async () => {
-    const nowInShanghai = toZonedTime(new Date(), 'Asia/Shanghai');
+    const nowInShanghai = toZonedTime(currentNow(), 'Asia/Shanghai');
     return { content: [{ type: 'text', text: format(nowInShanghai, 'yyyy-MM-dd') }] };
 });
 server.tool('get-stations-code-in-city', '通过中文城市名查询该城市所有火车站的名称及 station_code。', { city: z.string().describe('中文城市名称，例如："北京", "上海"') }, async ({ city }) => {

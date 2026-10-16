@@ -176,8 +176,11 @@ def check_reverse_validation(workspace):
               AND EXTRACT(DOW FROM start_datetime) IN (0, 6)
         """)
         weekend_count = cur.fetchone()[0]
-        check("No advisory events on weekends", weekend_count == 0,
-              f"Found {weekend_count} weekend events")
+        # Without advisory events there is nothing to validate.
+        cur.execute("SELECT COUNT(*) FROM gcal.events WHERE lower(summary) LIKE '%%advisory%%'")
+        event_count = cur.fetchone()[0]
+        check("No advisory events on weekends", event_count > 0 and weekend_count == 0,
+              f"Found {weekend_count} weekend events" if event_count else "No advisory events")
         cur.close()
         conn.close()
     except Exception:

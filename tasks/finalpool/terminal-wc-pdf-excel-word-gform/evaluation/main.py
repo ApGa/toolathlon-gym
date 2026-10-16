@@ -189,8 +189,11 @@ def check_reverse_validation(workspace):
             GROUP BY title HAVING COUNT(*) > 1
         """)
         dupes = cur.fetchall()
-        check("No duplicate supplier quality forms", len(dupes) == 0,
-              f"Duplicates: {dupes}")
+        # Without a supplier quality form there is nothing to validate.
+        cur.execute("SELECT COUNT(*) FROM gform.forms WHERE lower(title) LIKE '%%supplier%%quality%%'")
+        form_count = cur.fetchone()[0]
+        check("No duplicate supplier quality forms", form_count > 0 and len(dupes) == 0,
+              f"Duplicates: {dupes}" if form_count else "No supplier quality form")
         cur.close()
         conn.close()
     except Exception:

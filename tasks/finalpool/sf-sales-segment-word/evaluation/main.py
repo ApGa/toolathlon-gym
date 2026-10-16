@@ -3,7 +3,6 @@ import argparse
 import os
 import sys
 
-import openpyxl
 import psycopg2
 
 DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym", user="eigent", password="camel")
@@ -28,12 +27,6 @@ def num_close(a, b, tol=1.0):
         return abs(float(a) - float(b)) <= tol
     except (TypeError, ValueError):
         return False
-
-
-def str_match(a, b):
-    if a is None or b is None:
-        return a is None and b is None
-    return str(a).strip().lower() == str(b).strip().lower()
 
 
 def check_word_doc(agent_workspace):
@@ -123,43 +116,6 @@ def check_word_doc(agent_workspace):
     return True
 
 
-def check_excel_groundtruth(agent_workspace, groundtruth_workspace):
-    """Cross-check with groundtruth Excel for numeric accuracy."""
-    print("\n=== Cross-checking with Groundtruth Data ===")
-
-    gt_file = os.path.join(groundtruth_workspace, "Q4_Segment_Data.xlsx")
-    if not os.path.isfile(gt_file):
-        check("Groundtruth file exists", False)
-        return
-
-    gt_wb = openpyxl.load_workbook(gt_file, data_only=True)
-    gt_rows = list(gt_wb["Segment Comparison"].iter_rows(min_row=2, values_only=True))
-
-    # Verify groundtruth values against DB
-    conn = psycopg2.connect(**DB)
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT c."SEGMENT", ROUND(SUM(o."TOTAL_AMOUNT")::numeric, 2)
-        FROM sf_data."SALES_DW__PUBLIC__ORDERS" o
-        JOIN sf_data."SALES_DW__PUBLIC__CUSTOMERS" c ON o."CUSTOMER_ID" = c."CUSTOMER_ID"
-        WHERE o."ORDER_DATE" >= '2025-10-01' AND o."ORDER_DATE" <= '2025-12-31'
-        GROUP BY c."SEGMENT"
-    """)
-    db_data = {r[0]: float(r[1]) for r in cur.fetchall()}
-    conn.close()
-
-    for segment, actual in db_data.items():
-        gt_match = None
-        for r in gt_rows:
-            if str_match(r[0], segment):
-                gt_match = r
-                break
-        if gt_match:
-            check(f"Groundtruth {segment} actual matches DB",
-                  num_close(gt_match[2], actual, 1.0),
-                  f"GT={gt_match[2]}, DB={actual}")
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False, default=".")
@@ -168,15 +124,14 @@ def main():
     parser.add_argument("--res_log_file", required=False)
     args = parser.parse_args()
 
-    task_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    gt_dir = args.groundtruth_workspace or os.path.join(task_root, "groundtruth_workspace")
-
     print("=" * 70)
     print("SF SALES SEGMENT WORD - EVALUATION")
     print("=" * 70)
 
+    # Only the agent's document is graded. A cross-check of the reference
+    # workbook against the database never reads agent output, so it scored
+    # for every episode, including one that did nothing.
     check_word_doc(args.agent_workspace)
-    check_excel_groundtruth(args.agent_workspace, gt_dir)
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")

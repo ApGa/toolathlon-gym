@@ -1,13 +1,11 @@
-"""Preprocess for terminal-sf-fetch-support-ppt-email.
-Clears email data, injects noise emails, starts mock CSAT benchmark server on port 30408.
-Snowflake SUPPORT_CENTER is read-only.
+"""Prepare task data for terminal-sf-fetch-support-ppt-email.
+
+HTTP fixture lifecycle is managed by the environment server (task_config.json).
 """
 import argparse
 import asyncio
 import json
 import os
-import shutil
-import tarfile
 import uuid
 
 import psycopg2
@@ -15,39 +13,6 @@ import psycopg2
 DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432,
           dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
           user="eigent", password="camel")
-
-
-async def setup_mock_server():
-    """Extract mock_pages.tar.gz and start HTTP server on port 30408."""
-    task_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    files_dir = os.path.join(task_root, "files")
-    tmp_dir = os.path.join(task_root, "tmp")
-
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    tar_path = os.path.join(files_dir, "mock_pages.tar.gz")
-    with tarfile.open(tar_path, "r:gz") as tar:
-        tar.extractall(path=tmp_dir)
-
-    mock_dir = os.path.join(tmp_dir, "mock_pages")
-    port = 30408
-
-    kill_proc = await asyncio.create_subprocess_shell(
-        f"kill -9 $(lsof -ti:{port}) 2>/dev/null",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await kill_proc.wait()
-    await asyncio.sleep(0.5)
-
-    await asyncio.create_subprocess_shell(
-        f"nohup python3 -m http.server {port} --directory {mock_dir} "
-        f"> {mock_dir}/server.log 2>&1 &"
-    )
-    await asyncio.sleep(1)
-    print(f"[preprocess] Mock CSAT benchmark server running at http://localhost:{port}")
 
 
 def clear_and_inject_email():
@@ -99,7 +64,6 @@ async def main():
     args = parser.parse_args()
 
     clear_and_inject_email()
-    await setup_mock_server()
     print("[preprocess] Done.")
 
 

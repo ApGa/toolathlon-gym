@@ -34,6 +34,7 @@ def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
     return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
 
 from docx import Document
+from grader_helpers import PdfTextError, pdf_text
 from pptx import Presentation
 
 
@@ -251,45 +252,18 @@ def check_pdf(agent_workspace):
     else:
         print(f"  FAIL: PDF size is {file_size} bytes (need > 1KB)")
 
-    # 3. Contains "Shopping List" text
+    # 3. Contains "Shopping List" text. The file's size is no evidence of that.
     total += 1
     try:
-        # Try to read PDF text using PyPDF2 or pypdf
-        pdf_text = ""
-        try:
-            from pypdf import PdfReader
-            reader = PdfReader(pdf_path)
-            for page in reader.pages:
-                pdf_text += page.extract_text() or ""
-        except ImportError:
-            try:
-                from PyPDF2 import PdfReader
-                reader = PdfReader(pdf_path)
-                for page in reader.pages:
-                    pdf_text += page.extract_text() or ""
-            except ImportError:
-                # Fallback: check raw bytes for the string
-                with open(pdf_path, "rb") as f:
-                    raw = f.read()
-                pdf_text = raw.decode("latin-1", errors="ignore")
-
-        if "shopping list" in pdf_text.lower() or "Shopping List" in pdf_text:
-            passed += 1
-            print("  PASS: PDF contains 'Shopping List' text")
-        else:
-            # Even if text extraction fails, if file is large enough it likely has content
-            if file_size > 2000:
-                passed += 1
-                print("  PASS: PDF is substantial size, likely contains shopping list content")
-            else:
-                print(f"  FAIL: 'Shopping List' text not found in PDF. Extracted: '{pdf_text[:200]}'")
-    except Exception as e:
-        # If we can't read the PDF at all, check size as fallback
-        if file_size > 2000:
-            passed += 1
-            print(f"  PASS: PDF exists with substantial size ({file_size} bytes), text extraction failed: {e}")
-        else:
-            print(f"  FAIL: Could not read PDF text: {e}")
+        text = pdf_text(pdf_path)
+    except PdfTextError as e:
+        print(f"  FAIL: Could not read PDF text: {e}")
+        return passed, total
+    if "shopping list" in text.lower():
+        passed += 1
+        print("  PASS: PDF contains 'Shopping List' text")
+    else:
+        print(f"  FAIL: 'Shopping List' text not found in PDF. Extracted: '{text[:200]}'")
 
     return passed, total
 

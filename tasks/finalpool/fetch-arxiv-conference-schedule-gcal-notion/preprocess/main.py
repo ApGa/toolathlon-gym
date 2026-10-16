@@ -1,20 +1,12 @@
-"""
-Preprocess script for fetch-arxiv-conference-schedule-gcal-notion task.
+"""Prepare task data for fetch-arxiv-conference-schedule-gcal-notion.
 
-This script:
-1. Clears arxiv, scholarly, notion, gcal schemas
-2. Injects papers into arxiv and scholarly schemas
-3. Injects noise data
-4. Extracts mock_pages.tar.gz and starts HTTP server on port 30207
+HTTP fixture lifecycle is managed by the environment server (task_config.json).
 """
 
 import argparse
 import asyncio
 import json
 import os
-import shutil
-import tarfile
-import uuid
 
 import psycopg2
 
@@ -202,41 +194,6 @@ def inject_scholarly_papers(cur):
     print("[preprocess] Scholarly papers injected.")
 
 
-async def setup_mock_server():
-    """Extract mock_pages.tar.gz and start HTTP server on port 30207."""
-    print("[preprocess] Setting up mock conference API server...")
-
-    task_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    files_dir = os.path.join(task_root, "files")
-    tmp_dir = os.path.join(task_root, "tmp")
-
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    tar_path = os.path.join(files_dir, "mock_pages.tar.gz")
-    with tarfile.open(tar_path, "r:gz") as tar:
-        tar.extractall(path=tmp_dir)
-
-    mock_dir = os.path.join(tmp_dir, "mock_pages")
-    port = 30207
-
-    kill_proc = await asyncio.create_subprocess_shell(
-        f"kill -9 $(lsof -ti:{port}) 2>/dev/null",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await kill_proc.wait()
-    await asyncio.sleep(0.5)
-
-    await asyncio.create_subprocess_shell(
-        f"nohup python3 -m http.server {port} --directory {mock_dir} "
-        f"> {mock_dir}/server.log 2>&1 &"
-    )
-    await asyncio.sleep(1)
-    print(f"[preprocess] Mock API server running at http://localhost:{port}")
-
-
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
@@ -260,7 +217,6 @@ async def main():
         cur.close()
         conn.close()
 
-    await setup_mock_server()
     print("[preprocess] Preprocessing completed successfully!")
 
 

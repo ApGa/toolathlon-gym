@@ -1,18 +1,12 @@
-"""
-Preprocess script for playwright-howtocook-nutrition-gsheet-email task.
+"""Prepare task data for playwright-howtocook-nutrition-gsheet-email.
 
-This script:
-1. Clears Google Sheets, email data
-2. Injects noise data into gsheet and email
-3. Extracts mock_pages.tar.gz and starts HTTP server on port 30206
+HTTP fixture lifecycle is managed by the environment server (task_config.json).
 """
 
 import argparse
 import asyncio
 import json
 import os
-import shutil
-import tarfile
 import uuid
 
 import psycopg2
@@ -100,42 +94,6 @@ def inject_noise_email(cur):
     print("[preprocess] Noise email data injected.")
 
 
-async def setup_mock_server():
-    """Extract mock_pages.tar.gz and start HTTP server on port 30206."""
-    print("[preprocess] Setting up mock nutrition guidelines server...")
-
-    task_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    files_dir = os.path.join(task_root, "files")
-    tmp_dir = os.path.join(task_root, "tmp")
-
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    tar_path = os.path.join(files_dir, "mock_pages.tar.gz")
-    with tarfile.open(tar_path, "r:gz") as tar:
-        tar.extractall(path=tmp_dir)
-    print(f"[preprocess] Extracted {tar_path} to {tmp_dir}")
-
-    mock_dir = os.path.join(tmp_dir, "mock_pages")
-    port = 30206
-
-    kill_proc = await asyncio.create_subprocess_shell(
-        f"kill -9 $(lsof -ti:{port}) 2>/dev/null",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await kill_proc.wait()
-    await asyncio.sleep(0.5)
-
-    await asyncio.create_subprocess_shell(
-        f"nohup python3 -m http.server {port} --directory {mock_dir} "
-        f"> {mock_dir}/server.log 2>&1 &"
-    )
-    await asyncio.sleep(1)
-    print(f"[preprocess] Mock server running at http://localhost:{port}")
-
-
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
@@ -160,7 +118,6 @@ async def main():
         cur.close()
         conn.close()
 
-    await setup_mock_server()
     print("[preprocess] Preprocessing completed successfully!")
 
 

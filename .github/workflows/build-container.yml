@@ -1,0 +1,130 @@
+name: Build Toolathlon container
+
+on:
+  push:
+    branches:
+      - apga/session-db-shim
+    paths:
+      - .github/workflows/build-container.yml
+      - Dockerfile
+      - server.py
+      - http_fixtures.py
+      - task_setup.py
+      - task_process.py
+      - requirements.txt
+      - tests/**
+      - entrypoint.sh
+      - discover_tools.py
+      - configs/**
+      - db/**
+      - local_servers/**
+      - runtime_patches/**
+      - tasks/**
+  # Pull requests into the image branch run the tests and build the image without
+  # pushing it, so a change that breaks the build fails before it merges. They get
+  # no registry login and a read-only token (forks never get more).
+  pull_request:
+    branches:
+      - apga/session-db-shim
+    paths:
+      - .github/workflows/build-container.yml
+      - Dockerfile
+      - server.py
+      - http_fixtures.py
+      - task_setup.py
+      - task_process.py
+      - requirements.txt
+      - tests/**
+      - entrypoint.sh
+      - discover_tools.py
+      - configs/**
+      - db/**
+      - local_servers/**
+      - runtime_patches/**
+      - tasks/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_DB: toolathlon_test
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TOOLATHLON_TEST_PG_DSN: host=localhost port=5432 dbname=toolathlon_test user=postgres password=postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - run: pip install PyPDF2 requests
+      - run: python -m unittest discover -s local_servers/pdf-tools-mcp/tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci && npm run build && node --max-old-space-size=96 --test tests/runtime-limits.mjs
+        working-directory: local_servers/playwright-mcp
+
+  build:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ghcr.io/apga/toolathlon-gym:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # The same build for a pull request, which pushes nothing: no login, no tag in
+  # the registry, and no cache-to, so a PR cannot change the cache the image
+  # branch builds from (it may still read that cache).
+  build-check:
+    needs: test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha

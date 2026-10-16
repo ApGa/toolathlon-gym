@@ -1,7 +1,12 @@
 """Evaluation script for fetch-sf-sales-competitor-excel-notion."""
+import argparse
+import json
 import os
-import argparse, json, os, sys
+import sys
 import openpyxl
+import tarfile
+from pathlib import Path
+from grader_helpers import close, text, records
 
 
 DB_CONFIG = {
@@ -23,81 +28,68 @@ def check(name, condition, detail=""):
         detail_str = str(detail)[:200] if detail else ""
         print(f"  [FAIL] {name}: {detail_str}")
 
-def safe_float(val, default=None):
-    try:
-        if val is None:
-            return default
-        return float(str(val).replace(',', '').replace('%', '').replace('$', '').strip())
-    except (ValueError, TypeError):
-        return default
 
 def get_conn():
     import psycopg2
     return psycopg2.connect(**DB_CONFIG)
 
+def load_benchmarks():
+    # Read the exact fixture served by this task, rather than the unrelated
+    # example workbook. This also works in per-episode task copies.
+    archive = Path(__file__).resolve().parents[1] / "files/mock_pages.tar.gz"
+    with tarfile.open(archive) as bundle:
+        member = next(m for m in bundle.getmembers() if m.name.endswith("api/data.json"))
+        data = json.load(bundle.extractfile(member))
+    return {row["department"]: float(row["industry_avg"]) for row in data["benchmarks"]}
+
+
+def check_comparison(wb, salaries, benchmarks):
+    rows = records(wb, "Data_Analysis", ("department", "internal_avg_salary", "industry_avg", "gap"), check)
+    by_department = {text(r["department"]): r for r in rows}
+    check("All benchmark departments represented once", len(rows) == len(benchmarks)
+          and set(by_department) == {text(d) for d in benchmarks})
+    for department, benchmark in benchmarks.items():
+        row = by_department.get(text(department), {})
+        internal = salaries.get(department)
+        check(f"{department} comparison values", internal is not None
+              and close(row.get("internal_avg_salary"), internal, .02)
+              and close(row.get("industry_avg"), benchmark, .02)
+              and close(row.get("gap"), float(internal or 0) - benchmark, .02))
+    dimensions = [text(r["department"]) for r in rows]
+    check("Departments sorted alphabetically", dimensions == sorted(dimensions))
+    metrics = records(wb, "Metrics", ("metric", "value"), check)
+    check("Metrics has meaningful summary rows", len(metrics) >= 4
+          and all(text(r["metric"]) and r["value"] is not None for r in metrics))
+    # Recommendations are free-form; do not impose the old sales-region taxonomy.
+    sheet = next((sheet for sheet in wb if text(sheet.title) == "recommendations"), None)
+    check("Recommendations sheet exists", sheet is not None)
+    if sheet is not None:
+        data = [row for row in sheet.iter_rows(min_row=2, values_only=True) if any(text(v) for v in row)]
+        check("Recommendations contains actionable items", len(data) >= 2
+              and all(sum(bool(text(v)) for v in row) >= 2 for row in data))
+
+
 def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_file):
     global PASS_COUNT, FAIL_COUNT
-    PASS_COUNT = 0
-    FAIL_COUNT = 0
-
-    
-    excel_path = os.path.join(agent_workspace, "Sales_Competitor_Report.xlsx")
-    check("Sales_Competitor_Report.xlsx exists", os.path.exists(excel_path))
-    if os.path.exists(excel_path):
-        wb = openpyxl.load_workbook(excel_path)
-        gt_path = os.path.join(groundtruth_workspace, "Sales_Competitor_Report.xlsx")
-        gt_wb = openpyxl.load_workbook(gt_path) if os.path.exists(gt_path) else None
-
-        check("Data_Analysis sheet exists", "Data_Analysis" in wb.sheetnames)
-        if "Data_Analysis" in wb.sheetnames:
-            ws = wb["Data_Analysis"]
-            data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-            check("Data_Analysis has >= 5 rows", len(data_rows) >= 5, f"got {len(data_rows)}")
-
-            # Check headers
-            headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-            for expected_col in ['Region', 'Order_Count', 'Revenue', 'Market_Size_M', 'Market_Penetration_Pct']:
-                check(f"Data_Analysis has {expected_col} column",
-                      expected_col.lower() in headers, f"headers: {headers[:8]}")
-
-        check("Metrics sheet exists", "Metrics" in wb.sheetnames)
-        if "Metrics" in wb.sheetnames:
-            ws = wb["Metrics"]
-            data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-            check("Metrics has >= 4 rows", len(data_rows) >= 4, f"got {len(data_rows)}")
-
-            # Check headers
-            headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-            for expected_col in ['Metric', 'Value']:
-                check(f"Metrics has {expected_col} column",
-                      expected_col.lower() in headers, f"headers: {headers[:8]}")
-
-        check("Recommendations sheet exists", "Recommendations" in wb.sheetnames)
-        if "Recommendations" in wb.sheetnames:
-            ws = wb["Recommendations"]
-            data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-            check("Recommendations has >= 2 rows", len(data_rows) >= 2, f"got {len(data_rows)}")
-
-            # Check headers
-            headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-            for expected_col in ['Priority', 'Action', 'Region']:
-                check(f"Recommendations has {expected_col} column",
-                      expected_col.lower() in headers, f"headers: {headers[:8]}")
-
-        try:
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("SELECT id FROM notion.pages WHERE properties::text ILIKE %s AND archived = false",
-                        ('%dashboard%',))
-            pages = cur.fetchall()
-            check("Notion dashboard created", len(pages) >= 1, f"found {len(pages)} pages")
-            conn.close()
-        except Exception as e:
-            check("Notion check", False, str(e))
-
-        check("sf_competitor_processor.py exists", os.path.exists(os.path.join(agent_workspace, "sf_competitor_processor.py")))
-
-
+    PASS_COUNT = FAIL_COUNT = 0
+    path = os.path.join(agent_workspace, "Sales_Competitor_Report.xlsx")
+    check("Sales_Competitor_Report.xlsx exists", os.path.isfile(path))
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute('SELECT "DEPARTMENT", AVG("SALARY") FROM sf_data."HR_ANALYTICS__PUBLIC__EMPLOYEES" GROUP BY "DEPARTMENT"')
+            salaries = dict(cur.fetchall())
+            if os.path.isfile(path):
+                wb = openpyxl.load_workbook(path, data_only=True)
+                try:
+                    check_comparison(wb, salaries, load_benchmarks())
+                finally:
+                    wb.close()
+            cur.execute("SELECT COUNT(*) FROM notion.pages WHERE properties::text ILIKE %s AND archived = false", ("%Sf Competitor Dashboard%",))
+            check("Notion dashboard created", cur.fetchone()[0] >= 1)
+    finally:
+        conn.close()
+    check("sf_competitor_processor.py exists", os.path.isfile(os.path.join(agent_workspace, "sf_competitor_processor.py")))
     return FAIL_COUNT == 0, f"Passed {PASS_COUNT}/{PASS_COUNT + FAIL_COUNT} checks"
 
 def main():

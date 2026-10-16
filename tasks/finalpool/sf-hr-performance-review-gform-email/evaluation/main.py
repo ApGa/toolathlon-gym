@@ -46,19 +46,50 @@ def record(name, passed, detail=""):
         print(f"  [FAIL] {name}{msg}")
 
 
+def fail_all(names, detail):
+    """A missing deliverable fails every check that depends on it."""
+    for name in names:
+        record(name, False, detail)
+
+
+EXCEL_CHECKS = [
+    "Performance_Review_Setup.xlsx exists",
+    "Excel readable",
+    "Sheet has 7 department rows",
+    "Has Department column",
+    "Has Employee_Count column",
+    "Has Avg_Performance column",
+    "Contains Engineering department data",
+    "All 7 departments present",
+    "Engineering Employee_Count is 7096",
+    "Engineering Avg_Performance is ~3.21",
+]
+FORM_CHECKS = [
+    "Annual Performance Review Form exists",
+    "Form has at least 4 questions",
+    "Form has Department question",
+    "Form has Performance Rating question",
+    "Form has Key Achievements question",
+]
+EMAIL_CHECKS = [
+    "Email sent to hr_director@company.com",
+    "Email mentions performance review",
+]
+
+
 def check_excel(agent_workspace):
     print("\n=== Check 1: Excel Performance_Review_Setup.xlsx ===")
 
     xlsx_path = os.path.join(agent_workspace, "Performance_Review_Setup.xlsx")
     if not os.path.exists(xlsx_path):
-        record("Performance_Review_Setup.xlsx exists", False, f"Not found at {xlsx_path}")
+        fail_all(EXCEL_CHECKS, f"Not found at {xlsx_path}")
         return
     record("Performance_Review_Setup.xlsx exists", True)
 
     try:
         wb = openpyxl.load_workbook(xlsx_path)
     except Exception as e:
-        record("Excel readable", False, str(e))
+        fail_all(EXCEL_CHECKS[1:], str(e))
         return
     record("Excel readable", True)
 
@@ -72,7 +103,7 @@ def check_excel(agent_workspace):
     rows = list(ws.iter_rows(values_only=True))
 
     if not rows:
-        record("Sheet has data", False, "Sheet is empty")
+        fail_all(EXCEL_CHECKS[2:], "Sheet is empty")
         return
 
     data_rows = [r for r in rows[1:] if any(c for c in r)]
@@ -132,6 +163,8 @@ def check_excel(agent_workspace):
                    f"Got {avg_val}")
         except (TypeError, ValueError):
             record("Engineering Avg_Performance is ~3.21", False, f"Could not parse: {avg_perf}")
+    else:
+        fail_all(EXCEL_CHECKS[8:], "No Engineering row found")
 
 
 def check_gform():
@@ -148,10 +181,10 @@ def check_gform():
             review_form = (form_id, title)
             break
 
-    record("Annual Performance Review Form exists", review_form is not None,
-           f"Forms found: {[f[1] for f in forms]}")
-
-    if review_form:
+    if review_form is None:
+        fail_all(FORM_CHECKS, f"Forms found: {[f[1] for f in forms]}")
+    else:
+        record("Annual Performance Review Form exists", True)
         form_id, title = review_form
         cur.execute("SELECT COUNT(*) FROM gform.questions WHERE form_id = %s", (form_id,))
         q_count = cur.fetchone()[0]
@@ -203,10 +236,10 @@ def check_email():
             matching = (subject, from_addr, to_addr, body_text)
             break
 
-    record("Email sent to hr_director@company.com", matching is not None,
-           f"Messages found: {len(messages)}")
-
-    if matching:
+    if matching is None:
+        fail_all(EMAIL_CHECKS, f"Messages found: {len(messages)}")
+    else:
+        record("Email sent to hr_director@company.com", True)
         subject, _, _, body_text = matching
         all_text = ((subject or "") + " " + (body_text or "")).lower()
         has_hr_content = (

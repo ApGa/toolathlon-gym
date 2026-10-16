@@ -1,4 +1,4 @@
-Our academic department wants to review our course curriculum against the latest research trends. First, check our learning management system for the list of courses currently offered, their enrollment counts, and recent assessment scores.
+Our academic department wants to review our course curriculum against the latest research trends. First, check our learning management system for the list of courses currently offered, their enrollment counts, and assessment scores. Include all available courses; use each course's total_students enrollment count and the mean of its scored assignment submissions for Avg_Score. For arXiv papers without citation counts, report Citations as 0.
 
 Then search for recent scholarly papers related to topics like "machine learning", "data analytics", and "computational thinking" to understand current research directions in our teaching areas.
 

@@ -1,13 +1,11 @@
-"""Preprocess for terminal-yf-fetch-gsheet-excel-notion.
-YF is read-only. Set up mock HTTP server, clear gsheet and notion, inject noise."""
+"""Prepare task data for terminal-yf-fetch-gsheet-excel-notion.
+
+HTTP fixture lifecycle is managed by the environment server (task_config.json).
+"""
 import argparse
 import glob
 import json
 import os
-import shutil
-import subprocess
-import tarfile
-import time
 import uuid
 
 import psycopg2
@@ -19,9 +17,6 @@ DB_CONFIG = {
     "user": "eigent",
     "password": "camel",
 }
-
-TASK_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PORT = 30180
 
 
 def get_conn():
@@ -71,37 +66,6 @@ def inject_noise(cur):
     """, (noise_ss_id,))
 
 
-def setup_mock_server():
-    files_dir = os.path.join(TASK_ROOT, "files")
-    tmp_dir = os.path.join(TASK_ROOT, "tmp")
-
-    # Kill existing process on port
-    try:
-        subprocess.run(f"kill -9 $(lsof -ti:{PORT}) 2>/dev/null", shell=True, timeout=5)
-    except Exception:
-        pass
-    time.sleep(0.5)
-
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    tar_path = os.path.join(files_dir, "mock_pages.tar.gz")
-    if os.path.exists(tar_path):
-        with tarfile.open(tar_path, "r:gz") as tar:
-            tar.extractall(path=tmp_dir)
-
-    mock_dir = os.path.join(tmp_dir, "mock_pages")
-    if os.path.exists(mock_dir):
-        log_path = os.path.join(mock_dir, "server.log")
-        subprocess.Popen(
-            f"nohup python3 -m http.server {PORT} --directory {mock_dir} > {log_path} 2>&1 &",
-            shell=True
-        )
-        time.sleep(1)
-        print(f"[preprocess] Mock server started on port {PORT}")
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
@@ -123,12 +87,14 @@ def main():
         cur.close()
         conn.close()
 
-    setup_mock_server()
 
     if args.agent_workspace:
         for pattern in ["Market_Analysis_Report.xlsx", "market_*.py", "market_*.json",
                         "stock_*.json", "economic_*.json"]:
             for f in glob.glob(os.path.join(args.agent_workspace, pattern)):
+                # This is a supplied task input, not a prior agent output.
+                if os.path.basename(f) == "market_params.json":
+                    continue
                 os.remove(f)
                 print(f"[preprocess] Removed {f}")
 

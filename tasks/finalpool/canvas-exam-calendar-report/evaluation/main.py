@@ -18,9 +18,15 @@ import argparse
 import json
 import sys
 
-from .check_local import check_local  # uses iter_rows, str_match, lower() for content validation
-from .check_gcal import check_gcal
-from .check_email import check_email
+if __package__:
+    from .check_local import check_local
+    from .check_gcal import check_gcal
+    from .check_email import check_email
+else:
+    # The environment executes main.py directly; retain module execution too.
+    from check_local import check_local
+    from check_gcal import check_gcal
+    from check_email import check_email
 
 
 PASS_COUNT = 0

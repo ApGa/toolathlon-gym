@@ -1,15 +1,18 @@
 import axios, { AxiosInstance } from 'axios';
+import { PgRestRouter } from './pg-rest-router.js';
 
 export class BaseService {
-    protected client: AxiosInstance;
+    protected client: AxiosInstance | PgRestRouter;
     protected siteUrl: string;
     protected consumerKey: string;
     protected consumerSecret: string;
+    protected usePgRouter: boolean;
 
     constructor() {
         this.siteUrl = process.env.WORDPRESS_SITE_URL!;
         this.consumerKey = process.env.WOOCOMMERCE_CONSUMER_KEY!;
         this.consumerSecret = process.env.WOOCOMMERCE_CONSUMER_SECRET!;
+        this.usePgRouter = process.env.WOOCOMMERCE_USE_PG_ROUTER !== '0';
 
         // 移除末尾的斜杠
         this.siteUrl = this.siteUrl.replace(/\/$/, '');
@@ -17,6 +20,12 @@ export class BaseService {
         const baseURL = `${this.siteUrl}/wp-json/wc/v3`;
         
         console.error(`[WooCommerce] Initializing with base URL: ${baseURL}`);
+
+        if (this.usePgRouter) {
+            this.client = new PgRestRouter();
+            console.error('[WooCommerce] Using Postgres-backed Toolathlon router');
+            return;
+        }
 
         this.client = axios.create({
             baseURL,
@@ -29,8 +38,10 @@ export class BaseService {
             },
         });
 
+        const client = this.client as AxiosInstance;
+
         // 添加请求拦截器用于调试
-        this.client.interceptors.request.use(
+        client.interceptors.request.use(
             (config) => {
                 console.error(`[WooCommerce] Request: ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`);
                 console.error(`[WooCommerce] Params:`, config.params);
@@ -43,7 +54,7 @@ export class BaseService {
         );
 
         // 添加响应拦截器用于调试
-        this.client.interceptors.response.use(
+        client.interceptors.response.use(
             (response) => {
                 console.error(`[WooCommerce] Response: ${response.status} ${response.statusText}`);
                 return response;

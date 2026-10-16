@@ -266,8 +266,9 @@ def check_reverse_validation():
             WHERE lower(summary) LIKE '%compensation%review%'
         """)
         comp_events = cur.fetchall()
+        # Exactly one; without the review event the other guards have nothing to validate.
         check("No duplicate Compensation Review events",
-              len(comp_events) <= 1,
+              len(comp_events) == 1,
               f"Found {len(comp_events)} compensation review events: {[e[0] for e in comp_events]}")
 
         # Check no non-meeting event types were created (e.g., no 'bonus payout' or 'salary update' calendar events)
@@ -279,8 +280,9 @@ def check_reverse_validation():
         """)
         wrong_events = cur.fetchall()
         check("No wrong event types (bonus payout, salary update, pay raise)",
-              len(wrong_events) == 0,
-              f"Found unexpected events: {[e[0] for e in wrong_events]}")
+              bool(comp_events) and len(wrong_events) == 0,
+              f"Found unexpected events: {[e[0] for e in wrong_events]}" if comp_events
+              else "No compensation review event")
 
         # Check pre-existing events were not deleted
         cur.execute("""
@@ -290,8 +292,9 @@ def check_reverse_validation():
         """)
         other_count = cur.fetchone()[0]
         check("Pre-existing calendar events preserved (>= 5)",
-              other_count >= 5,
-              f"Found {other_count} non-compensation events (expected >= 5 from original 11)")
+              bool(comp_events) and other_count >= 5,
+              f"Found {other_count} non-compensation events (expected >= 5 from original 11)" if comp_events
+              else "No compensation review event")
 
     except Exception as e:
         check("Reverse validation (gcal noise)", False, str(e))

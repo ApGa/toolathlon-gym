@@ -2,8 +2,8 @@
 Preprocess for arxiv-latex-analysis-notion-word task.
 
 Injects 3 papers into arxiv.papers and arxiv_latex.papers.
-Creates 3 Notion pages for the papers.
-Clears email tables.
+Clears the Notion and email tables. The three "Paper: ..." Notion pages are the
+agent's deliverables, so they are not injected.
 
 Prerequisites:
   - PostgreSQL toolathlon_gym database running on localhost:5432
@@ -179,21 +179,6 @@ PAPERS = [
     },
 ]
 
-NOTION_PAGES = [
-    {
-        "title": "Paper: Scaling Laws for Neural Language Models",
-        "content": "Analysis of scaling laws paper. Key contribution: power-law scaling relationships between model size, data, compute, and loss.",
-    },
-    {
-        "title": "Paper: Training language models to follow instructions with human feedback",
-        "content": "Analysis of InstructGPT/RLHF paper. Key contribution: three-step RLHF pipeline for alignment.",
-    },
-    {
-        "title": "Paper: OPT: Open Pre-trained Transformer Language Models",
-        "content": "Analysis of OPT paper. Key contribution: open-source LLMs matching GPT-3 performance.",
-    },
-]
-
 
 def clear_tables(conn):
     with conn.cursor() as cur:
@@ -260,25 +245,6 @@ def inject_arxiv_latex(conn):
     print(f"[preprocess] Injected {len(PAPERS)} papers into arxiv_latex.papers")
 
 
-def inject_notion_pages(conn):
-    with conn.cursor() as cur:
-        for page in NOTION_PAGES:
-            cur.execute("""
-                INSERT INTO notion.pages (properties, url)
-                VALUES (%s::jsonb, %s)
-            """, (
-                json.dumps({
-                    "title": {
-                        "title": [{"type": "text", "text": {"content": page["title"]}}]
-                    },
-                    "content": page["content"],
-                }),
-                f"https://notion.so/{page['title'].replace(' ', '-').lower()}",
-            ))
-    conn.commit()
-    print(f"[preprocess] Injected {len(NOTION_PAGES)} Notion pages")
-
-
 def ensure_email_folder(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM email.folders WHERE name = 'INBOX' LIMIT 1")
@@ -299,7 +265,6 @@ def main():
         clear_tables(conn)
         inject_arxiv_papers(conn)
         inject_arxiv_latex(conn)
-        inject_notion_pages(conn)
         ensure_email_folder(conn)
     finally:
         conn.close()

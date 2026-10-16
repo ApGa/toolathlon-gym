@@ -28,7 +28,7 @@ logger = logging.getLogger("mcp_snowflake_server")
 
 
 def handle_tool_errors(func: Callable) -> Callable:
-    """Decorator to standardize tool error handling"""
+    """Log tool failures while preserving MCP's typed error response."""
 
     @wraps(func)
     async def wrapper(*args, **kwargs) -> list[types.TextContent]:
@@ -36,7 +36,9 @@ def handle_tool_errors(func: Callable) -> Callable:
             return await func(*args, **kwargs)
         except Exception as e:
             logger.error(f"Error in {func.__name__}: {str(e)}")
-            return [types.TextContent(type="text", text=f"Error: {str(e)}")]
+            # Returning ordinary TextContent here makes invalid SQL and bad
+            # arguments indistinguishable from successful tool output.
+            raise
 
     return wrapper
 
@@ -44,7 +46,8 @@ def handle_tool_errors(func: Callable) -> Callable:
 def check_database_access(database_name: str, allowed_databases: list[str] | None = None) -> None:
     """Check if database access is allowed based on allowed_databases restriction"""
     if allowed_databases is not None:
-        if database_name not in allowed_databases:
+        allowed_database_names = {db.lower() for db in allowed_databases}
+        if database_name.lower() not in allowed_database_names:
             raise ValueError(f"Access denied: Database '{database_name}' is not in the allowed databases list: {allowed_databases}")
 
 
@@ -312,7 +315,7 @@ async def handle_read_query(arguments, db, write_detector, *_, exclude_json_resu
     return results
 
 
-async def handle_append_insight(arguments, db, _, __, server, exclude_json_results=False):
+async def handle_append_insight(arguments, db, _, __, server, exclude_json_results=False, **___):
     if not arguments or "insight" not in arguments:
         raise ValueError("Missing insight argument")
 

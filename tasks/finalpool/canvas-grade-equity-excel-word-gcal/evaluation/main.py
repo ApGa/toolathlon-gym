@@ -192,8 +192,7 @@ def check_word(agent_workspace):
               f"Sample: {all_text[:300]}")
 
     except ImportError:
-        check("Word doc has content", os.path.getsize(docx_path) > 1000,
-              f"Size: {os.path.getsize(docx_path)}")
+        check("python-docx available", False, "python-docx is not installed, so the Word document cannot be checked")
     except Exception as e:
         check("Word doc readable", False, str(e))
 

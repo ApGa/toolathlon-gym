@@ -1,5 +1,5 @@
 {
-  "email": "assistant@company.example.com",
+  "email": "escalations@support.example.com",
   "password": "password123",
   "name": "AI Assistant",
   "imap_server": "localhost",

@@ -44,8 +44,8 @@ def main():
     parser.add_argument("--res_log_file", required=False)
     args = parser.parse_args()
 
-    # All checks for this task are DB-based (gsheet + email).
-    file_errors = []
+    # All checks for this task are DB-based (gsheet + email): the prompt asks
+    # for a Google Sheet and an e-mail only, so database errors block.
     db_errors = []
 
     try:
@@ -53,13 +53,7 @@ def main():
         cur = conn.cursor()
     except Exception as e:
         db_errors.append(f"Could not connect to PostgreSQL: {e}")
-        print(f"\n=== SUMMARY ===")
-        print(f"  File errors: {len(file_errors)}")
-        print(f"  DB errors:   {len(db_errors)} (not blocking)")
-        for e2 in db_errors:
-            print(f"    [DB] {e2}")
-        print(f"  Overall: PASS")
-        sys.exit(0)
+        _print_and_exit(db_errors)
 
     # 1. Check Google Sheet exists
     cur.execute("SELECT id FROM gsheet.spreadsheets WHERE title ILIKE '%Support Resolution Analysis%'")
@@ -68,19 +62,13 @@ def main():
         db_errors.append("No spreadsheet titled 'Support Resolution Analysis' found")
         cur.close()
         conn.close()
-        print(f"\n=== SUMMARY ===")
-        print(f"  File errors: {len(file_errors)}")
-        print(f"  DB errors:   {len(db_errors)} (not blocking)")
-        for e in db_errors:
-            print(f"    [DB] {e}")
-        print(f"  Overall: PASS")
-        sys.exit(0)
+        _print_and_exit(db_errors)
 
     ss_id = ss_rows[0][0]
 
     # 2. Check "By Issue Type" sheet
     print("  Checking By Issue Type...")
-    cur.execute("SELECT id FROM gsheet.sheets WHERE spreadsheet_id = %s AND title ILIKE '%Issue Type%'", (ss_id,))
+    cur.execute("SELECT id FROM gsheet.sheets WHERE spreadsheet_id = %s AND title ILIKE %s", (ss_id, "%Issue Type%"))
     sheet_rows = cur.fetchall()
     if not sheet_rows:
         db_errors.append("Sheet 'By Issue Type' not found")
@@ -123,7 +111,7 @@ def main():
 
     # 3. Check "By Priority" sheet
     print("  Checking By Priority...")
-    cur.execute("SELECT id FROM gsheet.sheets WHERE spreadsheet_id = %s AND title ILIKE '%Priority%'", (ss_id,))
+    cur.execute("SELECT id FROM gsheet.sheets WHERE spreadsheet_id = %s AND title ILIKE %s", (ss_id, "%Priority%"))
     sheet_rows = cur.fetchall()
     if not sheet_rows:
         db_errors.append("Sheet 'By Priority' not found")
@@ -181,42 +169,19 @@ def main():
     cur.close()
     conn.close()
 
-    # 5. Check XLSX content
-    print("  Checking XLSX content...")
-    agent_ws = args.agent_workspace or os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    xlsx_path = os.path.join(agent_ws, "Support_Resolution_Analysis.xlsx")
-    if not os.path.exists(xlsx_path):
-        file_errors.append("Support_Resolution_Analysis.xlsx not found")
-    else:
-        try:
-            import openpyxl
-            wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-            if len(wb.worksheets) < 1:
-                file_errors.append("XLSX has no sheets")
-            for ws in wb.worksheets:
-                rows = list(ws.iter_rows(values_only=True))
-                if len(rows) < 2:
-                    file_errors.append(f"XLSX sheet '{ws.title}' has only {len(rows)} rows (need >= 2)")
-            wb.close()
-            print(f"    XLSX OK ({len(wb.worksheets)} sheets)")
-        except Exception as e:
-            file_errors.append(f"Error reading XLSX: {e}")
+    _print_and_exit(db_errors)
 
-    # Final result: only file_errors block pass
+
+def _print_and_exit(db_errors):
     print(f"\n=== SUMMARY ===")
-    print(f"  File errors: {len(file_errors)}")
-    print(f"  DB errors:   {len(db_errors)} (not blocking)")
+    print(f"  DB errors:   {len(db_errors)}")
+    for e in db_errors[:15]:
+        print(f"    [DB] {e}")
     if db_errors:
-        for e in db_errors[:15]:
-            print(f"    [DB] {e}")
-    if file_errors:
-        for e in file_errors[:15]:
-            print(f"    [FILE] {e}")
         print(f"  Overall: FAIL")
         sys.exit(1)
-    else:
-        print(f"  Overall: PASS")
-        sys.exit(0)
+    print(f"  Overall: PASS")
+    sys.exit(0)
 
 
 if __name__ == "__main__":

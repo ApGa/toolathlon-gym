@@ -1,17 +1,10 @@
-"""
-Preprocess script for support-sla-audit-form task.
+"""Prepare task data for support-sla-audit-form.
 
-This script:
-1. Clears Google Forms data (responses -> questions -> forms) in the gform schema
-2. Extracts mock_pages.tar.gz and starts an HTTP server on port 30162
-3. Does NOT touch Snowflake data (read-only)
+HTTP fixture lifecycle is managed by the environment server (task_config.json).
 """
 
 import argparse
 import os
-import shutil
-import subprocess
-import tarfile
 import psycopg2
 
 DB_CONFIG = {
@@ -30,50 +23,6 @@ def clear_gform(cur):
     cur.execute("DELETE FROM gform.questions")
     cur.execute("DELETE FROM gform.forms")
     print("[preprocess] Google Forms data cleared.")
-
-
-def setup_mock_server():
-    """Extract mock pages and start HTTP server on port 30162."""
-    task_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    files_dir = os.path.join(task_dir, "files")
-    tmp_dir = os.path.join(task_dir, "tmp")
-
-    # Clean and recreate tmp directory
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    # Extract mock_pages.tar.gz
-    tar_path = os.path.join(files_dir, "mock_pages.tar.gz")
-    if os.path.exists(tar_path):
-        with tarfile.open(tar_path, "r:gz") as tar:
-            tar.extractall(path=tmp_dir)
-        print(f"[preprocess] Extracted mock_pages.tar.gz to {tmp_dir}")
-    else:
-        print(f"[preprocess] WARNING: {tar_path} not found")
-        return
-
-    # The HTML files are in tmp/mock_pages/
-    serve_dir = os.path.join(tmp_dir, "mock_pages")
-    if not os.path.exists(serve_dir):
-        serve_dir = tmp_dir
-
-    # Kill any existing process on port 30162
-    try:
-        subprocess.run(
-            "kill -9 $(lsof -ti:30162) 2>/dev/null",
-            shell=True,
-            capture_output=True,
-        )
-        print("[preprocess] Killed existing process on port 30162")
-    except Exception:
-        pass
-
-    # Start HTTP server on port 30162
-    log_file = os.path.join(tmp_dir, "http.log")
-    cmd = f"nohup python -m http.server 30162 --directory {serve_dir} > {log_file} 2>&1 &"
-    subprocess.Popen(cmd, shell=True)
-    print(f"[preprocess] Started HTTP server on port 30162 serving {serve_dir}")
 
 
 def main():
@@ -103,7 +52,6 @@ def main():
     print("\n" + "=" * 60)
     print("STEP 2: Set Up Mock HTTP Server")
     print("=" * 60)
-    setup_mock_server()
 
     print("\n" + "=" * 60)
     print("PREPROCESSING COMPLETED SUCCESSFULLY")

@@ -222,8 +222,7 @@ def check_pptx(agent_workspace):
               "Missing term reference")
 
     except ImportError:
-        size = os.path.getsize(pptx_path)
-        check("PPT file has content (>5KB)", size > 5000, f"Size: {size}")
+        check("python-pptx available", False, "python-pptx is not installed, so the presentation cannot be checked")
     except Exception as e:
         check("PPT parsing", False, str(e))
 

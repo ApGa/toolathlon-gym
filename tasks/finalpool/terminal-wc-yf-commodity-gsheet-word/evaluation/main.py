@@ -201,8 +201,14 @@ def check_reverse_validation(workspace):
             GROUP BY title HAVING COUNT(*) > 1
         """)
         dupes = cur.fetchall()
-        check("No duplicate pricing spreadsheets", len(dupes) == 0,
-              f"Duplicates: {dupes}")
+        # Without a commodity pricing spreadsheet there is nothing to validate.
+        cur.execute("""
+            SELECT COUNT(*) FROM gsheet.spreadsheets
+            WHERE lower(title) LIKE '%%commodity%%' OR lower(title) LIKE '%%pricing%%'
+        """)
+        sheet_count = cur.fetchone()[0]
+        check("No duplicate pricing spreadsheets", sheet_count > 0 and len(dupes) == 0,
+              f"Duplicates: {dupes}" if sheet_count else "No commodity pricing spreadsheet")
         cur.close()
         conn.close()
     except Exception:

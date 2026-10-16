@@ -126,8 +126,15 @@ def check_reverse_validation(workspace):
               AND to_addr::text NOT ILIKE '%%company.com%%'
         """)
         wrong_emails = cur.fetchone()[0]
-        check("No correlation emails to wrong recipients", wrong_emails == 0,
-              f"Found {wrong_emails} misrouted emails")
+        # Without the report e-mail there is nothing to validate.
+        cur.execute("""
+            SELECT COUNT(*) FROM email.messages
+            WHERE folder_id IN (SELECT id FROM email.folders WHERE LOWER(name) LIKE '%%sent%%')
+              AND to_addr::text ILIKE '%%cfo@company.com%%'
+        """)
+        sent = cur.fetchone()[0]
+        check("No correlation emails to wrong recipients", sent > 0 and wrong_emails == 0,
+              f"Found {wrong_emails} misrouted emails" if sent else "No e-mail to cfo@company.com was sent")
         cur.close()
         conn.close()
     except Exception:

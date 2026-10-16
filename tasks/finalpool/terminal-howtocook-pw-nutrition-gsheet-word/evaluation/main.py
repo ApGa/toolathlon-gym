@@ -154,8 +154,11 @@ def check_reverse_validation(workspace):
             GROUP BY title HAVING COUNT(*) > 1
         """)
         dupes = cur.fetchall()
-        check("No duplicate Nutrition Dashboard spreadsheets", len(dupes) == 0,
-              f"Found duplicates: {dupes}")
+        # Without a nutrition spreadsheet there is nothing to validate.
+        cur.execute("SELECT COUNT(*) FROM gsheet.spreadsheets WHERE LOWER(title) LIKE '%%nutrition%%'")
+        sheet_count = cur.fetchone()[0]
+        check("No duplicate Nutrition Dashboard spreadsheets", sheet_count > 0 and len(dupes) == 0,
+              f"Found duplicates: {dupes}" if sheet_count else "No nutrition spreadsheet")
         cur.close()
         conn.close()
     except Exception:

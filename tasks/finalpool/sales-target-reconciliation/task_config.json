@@ -13,5 +13,10 @@
     "history",
     "python_execute"
   ],
-  "meta": {}
+  "meta": {},
+  "http_fixture": {
+    "port": 30160,
+    "source": "files/mock_dashboard.tar.gz",
+    "root": "mock_dashboard"
+  }
 }
