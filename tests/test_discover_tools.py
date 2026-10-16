@@ -194,6 +194,20 @@ class LocalServerBuildTest(unittest.TestCase):
         manifests = [*self.SERVERS.glob("*/package.json"), *self.SERVERS.glob("*/src/*/package.json")]
         return sorted(p.parent for p in manifests if "node_modules" not in p.parts)
 
+    def test_tsconfig_extends_only_files_in_the_server_tree(self):
+        # filesystem's tsconfig extended ../../tsconfig.json: /opt/tsconfig.json in the image, so tsc stopped with
+        # TS5083 and the image kept the prebuilt dist/ from the repository.
+        bad = {}
+        for project in self.node_projects():
+            for tsconfig in project.glob("tsconfig*.json"):
+                for base in re.findall(r'"extends"\s*:\s*"([^"]+)"', tsconfig.read_text()):
+                    if not base.startswith("."):
+                        continue  # a package from node_modules
+                    target = (tsconfig.parent / base).resolve()
+                    if not target.is_file() or self.SERVERS.resolve() not in target.parents:
+                        bad[str(tsconfig.relative_to(ROOT))] = base
+        self.assertEqual(bad, {})
+
     def test_lockfiles_match_their_package_json(self):
         # `npm ci` refuses a lockfile whose root dependencies differ from package.json.
         stale = {}
