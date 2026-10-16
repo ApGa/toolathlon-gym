@@ -185,6 +185,46 @@ class DiscoverToolsTest(unittest.TestCase):
         self.assertEqual({server: tasks[:3] for server, tasks in needed.items() if server not in configs}, {})
 
 
+class LocalServerBuildTest(unittest.TestCase):
+    """What the image build's `npm ci` and `npm run build` need from each Node MCP server's files."""
+
+    SERVERS = ROOT / "local_servers"
+
+    def node_projects(self):
+        manifests = [*self.SERVERS.glob("*/package.json"), *self.SERVERS.glob("*/src/*/package.json")]
+        return sorted(p.parent for p in manifests if "node_modules" not in p.parts)
+
+    def test_lockfiles_match_their_package_json(self):
+        # `npm ci` refuses a lockfile whose root dependencies differ from package.json.
+        stale = {}
+        for project in self.node_projects():
+            lock = project / "package-lock.json"
+            if not lock.is_file():
+                continue
+            pkg = json.loads((project / "package.json").read_text())
+            root = json.loads(lock.read_text())["packages"][""]
+            for field in ("dependencies", "devDependencies", "optionalDependencies"):
+                if (pkg.get(field) or {}) != (root.get(field) or {}):
+                    stale.setdefault(str(lock.relative_to(ROOT)), []).append(field)
+        self.assertEqual(stale, {})
+
+    def test_lockfiles_pin_each_tarball_and_its_integrity(self):
+        # Then `npm ci` downloads exactly the pinned tarballs and checks them. mcp-npx-fetch's lockfile recorded
+        # neither, so each install first looked up all 337 packages in the registry's metadata.
+        unpinned = {}
+        for project in self.node_projects():
+            lock = project / "package-lock.json"
+            if not lock.is_file():
+                continue
+            for path, entry in json.loads(lock.read_text())["packages"].items():
+                if "node_modules/" not in path or entry.get("link"):
+                    continue  # the project, its workspaces and links to them
+                resolved = entry.get("resolved", "")
+                if not resolved or resolved.startswith("https://registry.npmjs.org/") and not entry.get("integrity"):
+                    unpinned.setdefault(str(lock.relative_to(ROOT)), []).append(path)
+        self.assertEqual({lock: paths[:3] for lock, paths in unpinned.items()}, {})
+
+
 class LocalServerLockTest(unittest.TestCase):
     """The image runs `uv sync` in every Python MCP server, so each must ship the lock it was tested with.
 
