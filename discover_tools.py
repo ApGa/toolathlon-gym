@@ -13,6 +13,11 @@ catalog: if any configured server cannot be launched, does not answer, or lists 
 
 Every server runs in the same scratch workspace path and with PYTHONHASHSEED=0, so build-time paths and
 set orders that servers put into tool descriptions are the same in every build.
+
+With --check-entry-points it launches nothing: it checks that every configured server's entry point (the
+built script or the venv and command its launch runs, read from the same configs) exists, names each
+server that lacks one, and exits with status 1 if any does. The image build runs it right after building
+the servers.
 """
 import argparse
 import json
@@ -134,6 +139,74 @@ def launch_spec(cfg: dict, workspace: str, task_dir: str, database: str,
         "PYTHONHASHSEED": "0",
     }
     return [command, *args], env, cwd
+
+
+def entry_points(cfg: dict, local_servers: str = LOCAL_SERVERS) -> list[str]:
+    """The paths under local_servers that a server's launch runs, which the image build must produce.
+
+    Every launch argument that is such a path: a Node server's built script, a uv project directory, a venv's
+    interpreter. For `uv ... run X`, also the project's .venv/bin/python and X: the script after `run python`
+    (relative to the project), or else the console script .venv/bin/X that `uv sync` installs. Paths in the
+    agent workspace or the task directory are made per session, not built, so they are not entry points.
+    """
+    params = cfg.get("params", {})
+    # Keep the workspace placeholders as they are: they never name a path under local_servers.
+    argv = [str(resolve(a, "${agent_workspace}", "${task_dir}", local_servers))
+            for a in [params.get("command", ""), *params.get("args", [])]]
+    prefix = local_servers.rstrip("/") + "/"
+    points = [a for a in argv if a.startswith(prefix)]
+    if os.path.basename(argv[0]) == "uv" and "run" in argv[1:]:
+        run = argv.index("run", 1)
+        target = argv[run + 1] if run + 1 < len(argv) else ""
+        if "--directory" in argv[1:run]:
+            project = argv[argv.index("--directory", 1) + 1]
+        else:
+            project = os.path.dirname(target)  # `uv run <script>` runs from the script's directory (launch_spec)
+        if project.startswith(prefix):
+            points.append(os.path.join(project, ".venv", "bin", "python"))
+            if target in ("python", "python3"):
+                if run + 2 < len(argv) and not argv[run + 2].startswith("-"):
+                    points.append(os.path.join(project, argv[run + 2]))
+            elif target and "/" not in target:
+                points.append(os.path.join(project, ".venv", "bin", target))
+    return list(dict.fromkeys(points))
+
+
+def missing_entry_points(cfg: dict, local_servers: str = LOCAL_SERVERS) -> list[str]:
+    """What a server's launch needs and does not find: entry points that do not exist, or the command itself."""
+    command = str(resolve(cfg.get("params", {}).get("command", ""), "", "", local_servers))
+    missing = [p for p in entry_points(cfg, local_servers) if not os.path.exists(p)]
+    if "/" not in command and shutil.which(command) is None:
+        missing.insert(0, f"{command} (not on PATH)")
+    elif "/" in command and os.path.exists(command) and not os.access(command, os.X_OK):
+        missing.insert(0, f"{command} (not executable)")
+    return missing
+
+
+def check_entry_points(configs: dict[str, tuple[Path, dict]], problems: list[str], local_servers: str) -> int:
+    """Print each configured server's entry points; 1, naming each server that lacks one, if any does."""
+    print(f"Checking the entry points of {len(configs)} configured MCP servers...")
+    for name, (path, cfg) in configs.items():
+        points = entry_points(cfg, local_servers)
+        missing = missing_entry_points(cfg, local_servers)
+        if missing:
+            problems.append(f"{name} ({path.name}): missing {', '.join(missing)}")
+            print(f"  {name}: MISSING {', '.join(missing)}")
+        else:
+            print(f"  {name}: ok ({', '.join(points) or 'nothing under ' + local_servers + ' to check'})")
+    if problems:
+        # Last in the log, which is all a failed build step shows: stdout is block-buffered in a pipe.
+        sys.stdout.flush()
+        print(
+            "\nERROR: these MCP servers cannot be launched from this image, so their tasks would get none of "
+            "their tools. Build each one (the Dockerfile's server build steps) or fix its config:",
+            file=sys.stderr,
+        )
+        for problem in problems:
+            print(f"  - {problem}", file=sys.stderr)
+        return 1
+    print(f"All {len(configs)} configured servers have their entry points.")
+    return 0
 
 
 class _Session:
@@ -305,13 +378,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=SERVER_TIMEOUT_S, help="seconds per attempt")
     parser.add_argument("--init-retry", type=float, default=INIT_RETRY_S)
     parser.add_argument("--attempts", type=int, default=ATTEMPTS)
+    parser.add_argument("--check-entry-points", action="store_true",
+                        help="launch nothing; check that every configured server's entry point exists")
     args = parser.parse_args(argv)
 
-    print("Discovering MCP server tool schemas...")
-    database = os.environ.get("PG_DATABASE") or os.environ.get("PGDATABASE") or "toolathlon_template"
     configs, problems = load_configs(args.configs)
     if not configs and not problems:
         problems.append(f"no MCP server configs in {args.configs}")
+    if args.check_entry_points:
+        return check_entry_points(configs, problems, args.local_servers)
+
+    print("Discovering MCP server tool schemas...")
+    database = os.environ.get("PG_DATABASE") or os.environ.get("PGDATABASE") or "toolathlon_template"
 
     created_root = not args.workspace_root.exists()
     all_schemas: dict[str, list[dict]] = {}
@@ -348,6 +426,7 @@ def main(argv: list[str] | None = None) -> int:
                 pass
 
     if problems:
+        sys.stdout.flush()  # keep the error last when stdout and stderr share the build log
         print(
             f"\nERROR: incomplete MCP tool catalog: {len(all_schemas)} of {len(configs)} configured servers "
             f"answered. server.py offers each task only the tools in this catalog, so tasks that need a "

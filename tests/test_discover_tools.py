@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import textwrap
@@ -126,6 +127,18 @@ class DiscoverToolsTest(unittest.TestCase):
         self.assertEqual(out.count("attempt"), 2, out)
         self.assertFalse(self.output.exists())
 
+    def test_the_build_log_ends_with_the_error(self):
+        # The image build merges discovery's stdout and stderr into one log, whose end is all a failed step shows.
+        self.config("a.yaml", "alpha")
+        self.config("s.yaml", "snowflake", mode="crash")
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "discover_tools.py"), "--configs", str(self.configs),
+             "--output", str(self.output), "--workspace-root", str(self.root / "ws"),
+             "--local-servers", str(self.root / "servers"), "--timeout", "20", "--init-retry", "5", "--attempts", "1"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertGreater(proc.stdout.index("ERROR: incomplete MCP tool catalog"), proc.stdout.index("FAILED"))
+
     def test_a_server_without_tools_fails(self):
         self.config("a.yaml", "alpha", tools=[])
         code, _, err = self.discover()
@@ -183,6 +196,162 @@ class DiscoverToolsTest(unittest.TestCase):
                 needed.setdefault(server, []).append(path.parent.name)
         self.assertIn("snowflake", needed)
         self.assertEqual({server: tasks[:3] for server, tasks in needed.items() if server not in configs}, {})
+
+
+class EntryPointTest(unittest.TestCase):
+    """The image build checks, before discovery, that each configured server's build left its entry point."""
+
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.servers = self.root / "servers"
+        self.configs = self.root / "configs"
+        self.configs.mkdir()
+
+    def write_config(self, filename, name, command, args):
+        (self.configs / filename).write_text(json.dumps(
+            {"type": "stdio", "name": name, "params": {"command": command, "args": args}}))
+
+    def make(self, *paths):
+        for rel in paths:
+            path = self.servers / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("")
+
+    def check(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = discover_tools.main(["--check-entry-points", "--configs", str(self.configs),
+                                        "--local-servers", str(self.servers),
+                                        "--output", str(self.root / "tool_schemas.json")])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_entry_points_of_each_kind_of_launch(self):
+        ls = "/opt/local_servers"
+        cases = {
+            "node script": ("node", ["${local_servers_paths}/a/dist/index.js", "${agent_workspace}"],
+                            [f"{ls}/a/dist/index.js"]),
+            "uv console script": ("uv", ["--directory", "${local_servers_paths}/b", "run", "b-server",
+                                         "--out", "${agent_workspace}/x", "--config", "${task_dir}/c.json"],
+                                  [f"{ls}/b", f"{ls}/b/.venv/bin/python", f"{ls}/b/.venv/bin/b-server"]),
+            "uv python script": ("uv", ["--directory", "${local_servers_paths}/c", "run", "python", "server/main.py"],
+                                 [f"{ls}/c", f"{ls}/c/.venv/bin/python", f"{ls}/c/server/main.py"]),
+            "uv run script path": ("uv", ["run", "${local_servers_paths}/d/server.py"],
+                                   [f"{ls}/d/server.py", f"{ls}/d/.venv/bin/python"]),
+            "venv interpreter": ("${local_servers_paths}/e/.venv/bin/python3", ["-c", "import e"],
+                                 [f"{ls}/e/.venv/bin/python3"]),
+            "nothing local": ("npx", ["-y", "some-package"], []),
+        }
+        for kind, (command, args, expected) in cases.items():
+            with self.subTest(kind):
+                cfg = {"params": {"command": command, "args": args}}
+                self.assertEqual(discover_tools.entry_points(cfg, ls), expected)
+
+    def test_passes_when_every_entry_point_exists(self):
+        self.make("fetch/dist/index.js", "py/.venv/bin/python", "py/.venv/bin/py-server")
+        self.write_config("a.yaml", "fetch", "node", ["${local_servers_paths}/fetch/dist/index.js"])
+        self.write_config("b.yaml", "py", sys.executable, [])  # an interpreter path outside local_servers
+        self.write_config("c.yaml", "py2", "uv", ["--directory", "${local_servers_paths}/py", "run", "py-server"])
+        with patch("shutil.which", return_value="/usr/bin/found"):
+            code, out, err = self.check()
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("All 3 configured servers have their entry points.", out)
+        self.assertFalse((self.root / "tool_schemas.json").exists(), "the check writes no catalog")
+
+    def test_names_each_server_whose_build_left_no_entry_point(self):
+        self.make("ok/build/index.js", "py/.venv/bin/python")
+        self.write_config("ok.yaml", "rail", "node", ["${local_servers_paths}/ok/build/index.js"])
+        self.write_config("npx-fetch.yaml", "fetch", "node", ["${local_servers_paths}/mcp-npx-fetch/dist/index.js"])
+        self.write_config("py.yaml", "py", "uv", ["--directory", "${local_servers_paths}/py", "run", "py-server"])
+        with patch("shutil.which", return_value="/usr/bin/found"):
+            code, out, err = self.check()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(f"fetch (npx-fetch.yaml): missing {self.servers}/mcp-npx-fetch/dist/index.js", err)
+        self.assertIn(f"py (py.yaml): missing {self.servers}/py/.venv/bin/py-server", err)
+        self.assertNotIn("rail", err)
+
+    def test_the_build_log_ends_with_the_servers_that_lack_one(self):
+        # A failed build step shows only its last lines, and stdout is buffered when it is a pipe.
+        self.make("ok/build/index.js")
+        self.write_config("npx-fetch.yaml", "fetch", sys.executable,
+                          ["${local_servers_paths}/mcp-npx-fetch/dist/index.js"])
+        self.write_config("ok.yaml", "rail", sys.executable, ["${local_servers_paths}/ok/build/index.js"])
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "discover_tools.py"), "--check-entry-points", "--configs", str(self.configs),
+             "--local-servers", str(self.servers)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("fetch (npx-fetch.yaml): missing", proc.stdout.strip().splitlines()[-1])
+
+    def test_a_command_that_is_not_installed_fails(self):
+        self.make("ok/build/index.js")
+        self.write_config("ok.yaml", "rail", "node", ["${local_servers_paths}/ok/build/index.js"])
+        with patch("shutil.which", return_value=None):
+            code, _, err = self.check()
+        self.assertEqual(code, 1)
+        self.assertIn("rail (ok.yaml): missing node (not on PATH)", err)
+
+    def test_every_repository_config_has_an_entry_point_to_check(self):
+        # The build's check covers exactly the configured servers, so a new config is checked without a
+        # Dockerfile change; one whose launch names nothing it could check would slip past it.
+        configs, problems = discover_tools.load_configs(ROOT / "configs" / "mcp_servers")
+        self.assertEqual(problems, [])
+        self.assertEqual([name for name, (_, cfg) in configs.items() if not discover_tools.entry_points(cfg)], [])
+
+
+class LocalServerBuildTest(unittest.TestCase):
+    """What the image build's `npm ci` and `npm run build` need from each Node MCP server's files."""
+
+    SERVERS = ROOT / "local_servers"
+
+    def node_projects(self):
+        manifests = [*self.SERVERS.glob("*/package.json"), *self.SERVERS.glob("*/src/*/package.json")]
+        return sorted(p.parent for p in manifests if "node_modules" not in p.parts)
+
+    def test_tsconfig_extends_only_files_in_the_server_tree(self):
+        # filesystem's tsconfig extended ../../tsconfig.json: /opt/tsconfig.json in the image, so tsc stopped with
+        # TS5083 and the image kept the prebuilt dist/ from the repository.
+        bad = {}
+        for project in self.node_projects():
+            for tsconfig in project.glob("tsconfig*.json"):
+                for base in re.findall(r'"extends"\s*:\s*"([^"]+)"', tsconfig.read_text()):
+                    if not base.startswith("."):
+                        continue  # a package from node_modules
+                    target = (tsconfig.parent / base).resolve()
+                    if not target.is_file() or self.SERVERS.resolve() not in target.parents:
+                        bad[str(tsconfig.relative_to(ROOT))] = base
+        self.assertEqual(bad, {})
+
+    def test_lockfiles_match_their_package_json(self):
+        # `npm ci` refuses a lockfile whose root dependencies differ from package.json.
+        stale = {}
+        for project in self.node_projects():
+            lock = project / "package-lock.json"
+            if not lock.is_file():
+                continue
+            pkg = json.loads((project / "package.json").read_text())
+            root = json.loads(lock.read_text())["packages"][""]
+            for field in ("dependencies", "devDependencies", "optionalDependencies"):
+                if (pkg.get(field) or {}) != (root.get(field) or {}):
+                    stale.setdefault(str(lock.relative_to(ROOT)), []).append(field)
+        self.assertEqual(stale, {})
+
+    def test_lockfiles_pin_each_tarball_and_its_integrity(self):
+        # Then `npm ci` downloads exactly the pinned tarballs and checks them. mcp-npx-fetch's lockfile recorded
+        # neither, so each install first looked up all 337 packages in the registry's metadata.
+        unpinned = {}
+        for project in self.node_projects():
+            lock = project / "package-lock.json"
+            if not lock.is_file():
+                continue
+            for path, entry in json.loads(lock.read_text())["packages"].items():
+                if "node_modules/" not in path or entry.get("link"):
+                    continue  # the project, its workspaces and links to them
+                resolved = entry.get("resolved", "")
+                if not resolved or resolved.startswith("https://registry.npmjs.org/") and not entry.get("integrity"):
+                    unpinned.setdefault(str(lock.relative_to(ROOT)), []).append(path)
+        self.assertEqual({lock: paths[:3] for lock, paths in unpinned.items()}, {})
 
 
 class LocalServerLockTest(unittest.TestCase):
