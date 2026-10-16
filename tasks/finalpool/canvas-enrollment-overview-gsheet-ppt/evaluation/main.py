@@ -164,9 +164,8 @@ def check_pptx(agent_workspace):
         return slide_count >= 8
 
     except ImportError:
-        size = os.path.getsize(pptx_path)
-        record("PPT file has content (>5KB)", size > 5000, f"Size: {size} bytes")
-        return size > 5000
+        record("python-pptx available", False, "python-pptx is not installed, so the presentation cannot be checked")
+        return False
     except Exception as e:
         record("PPT file readable", False, str(e))
         return False
@@ -216,9 +215,8 @@ def check_word(agent_workspace):
         return True
 
     except ImportError:
-        size = os.path.getsize(docx_path)
-        record("Word file has content (>3KB)", size > 3000, f"Size: {size} bytes")
-        return size > 3000
+        record("python-docx available", False, "python-docx is not installed, so the Word document cannot be checked")
+        return False
     except Exception as e:
         record("Word file readable", False, str(e))
         return False

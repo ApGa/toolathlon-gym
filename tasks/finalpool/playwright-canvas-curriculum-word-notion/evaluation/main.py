@@ -69,8 +69,8 @@ def check_word(agent_workspace):
     record("Accreditation_Compliance_Report.docx exists", True)
 
     if Document is None:
-        record("python-docx available", False, "Cannot import docx")
-        return True
+        record("python-docx available", False, "python-docx is not installed, so the Word document cannot be checked")
+        return False
 
     try:
         doc = Document(doc_path)

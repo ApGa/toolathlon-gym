@@ -208,9 +208,8 @@ def check_word(agent_workspace):
         return True
 
     except ImportError:
-        size = os.path.getsize(docx_path)
-        record("Word file has content (>3KB)", size > 3000, f"Size: {size} bytes")
-        return size > 3000
+        record("python-docx available", False, "python-docx is not installed, so the Word document cannot be checked")
+        return False
     except Exception as e:
         record("Word file readable", False, str(e))
         return False

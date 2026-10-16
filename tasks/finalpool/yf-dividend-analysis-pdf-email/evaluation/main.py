@@ -12,6 +12,7 @@ import os
 import sys
 
 import psycopg2
+from grader_helpers import PdfTextError, pdf_text
 
 def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
     return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
@@ -65,24 +66,12 @@ def check_pdf(agent_workspace):
     size = os.path.getsize(pdf_path)
     record("PDF file size reasonable", size > 1024, f"Size: {size} bytes")
 
-    # Try to extract text
+    # An unreadable PDF fails here and in every content check below.
     try:
-        import PyPDF2
-        with open(pdf_path, "rb") as f:
-            reader = PyPDF2.PdfReader(f)
-            text = ""
-            for page in reader.pages:
-                text += page.extract_text() or ""
-    except ImportError:
-        try:
-            import pdfplumber
-            with pdfplumber.open(pdf_path) as p:
-                text = ""
-                for page in p.pages:
-                    text += page.extract_text() or ""
-        except ImportError:
-            print("  [WARN] No PDF reader available. Checking existence only.")
-            return True
+        text = pdf_text(pdf_path)
+    except PdfTextError as error:
+        record("PDF text readable", False, str(error))
+        text = ""
 
     text_lower = text.lower()
 

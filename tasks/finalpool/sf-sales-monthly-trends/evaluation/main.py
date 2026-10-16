@@ -161,8 +161,7 @@ def main():
             if len(_missing) == len(_kws):
                 all_errors.append(f"Trends_Summary.docx missing expected keywords: {_missing}")
         except ImportError:
-            if os.path.getsize(docx_path) < 100:
-                all_errors.append("Trends_Summary.docx too small")
+            all_errors.append("python-docx is not installed, so Trends_Summary.docx cannot be checked")
         except Exception as _e:
             all_errors.append(f"Error reading Trends_Summary.docx: {_e}")
 

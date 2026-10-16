@@ -165,8 +165,7 @@ def main():
             if len(_missing) == len(_kws):
                 all_errors.append(f"Market_Analysis.docx missing expected keywords: {_missing}")
         except ImportError:
-            if os.path.getsize(docx_path) < 100:
-                all_errors.append("Market_Analysis.docx too small")
+            all_errors.append("python-docx is not installed, so Market_Analysis.docx cannot be checked")
         except Exception as _e:
             all_errors.append(f"Error reading Market_Analysis.docx: {_e}")
 

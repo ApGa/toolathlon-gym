@@ -182,8 +182,8 @@ def check_pptx(agent_workspace):
     record("PowerPoint file exists", True)
 
     if Presentation is None:
-        record("python-pptx available", False, "Cannot import pptx")
-        return True  # File exists, can't verify content
+        record("python-pptx available", False, "python-pptx is not installed, so the presentation cannot be checked")
+        return False
 
     try:
         prs = Presentation(pptx_file)

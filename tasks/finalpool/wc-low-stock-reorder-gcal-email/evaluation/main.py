@@ -78,15 +78,17 @@ def check_word_file(agent_workspace):
         return False, "Reorder_Report.docx not found"
     try:
         from docx import Document
+    except ImportError:
+        return False, "python-docx is not installed, so Reorder_Report.docx cannot be checked"
+    try:
         doc = Document(word_path)
-        full_text = " ".join(p.text for p in doc.paragraphs)
-        full_text += " ".join(cell.text for t in doc.tables for row in t.rows for cell in row.cells)
-        if "low stock" in full_text.lower() or "reorder" in full_text.lower():
-            return True, ""
-        return False, "Word doc does not mention 'Low Stock' or 'Reorder'"
     except Exception as e:
-        # Check just file existence if docx not available
+        return False, f"Reorder_Report.docx is not a readable Word document: {e}"
+    full_text = " ".join(p.text for p in doc.paragraphs)
+    full_text += " ".join(cell.text for t in doc.tables for row in t.rows for cell in row.cells)
+    if "low stock" in full_text.lower() or "reorder" in full_text.lower():
         return True, ""
+    return False, "Word doc does not mention 'Low Stock' or 'Reorder'"
 
 
 def main():
