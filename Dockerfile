@@ -65,60 +65,72 @@ ENV LOCAL_SERVERS_PATH=/opt/local_servers
 # `-e OPENREWARD_FROZEN_DATE=YYYY-MM-DD` (or empty to use real wall-clock).
 ENV OPENREWARD_FROZEN_DATE=2026-03-08
 
-# Install Playwright browser
-RUN playwright install chromium || true
-
 # Copy and build MCP servers
 COPY local_servers/ /opt/local_servers/
 
-# Build Node.js MCP servers (parallel)
-RUN for dir in \
-        /opt/local_servers/12306-mcp \
-        /opt/local_servers/Calendar-Autoauth-MCP-Server \
-        /opt/local_servers/filesystem \
-        /opt/local_servers/google-forms-mcp \
-        /opt/local_servers/HowToCook-mcp \
-        /opt/local_servers/mcp-canvas-lms \
-        /opt/local_servers/mcp-npx-fetch \
-        /opt/local_servers/playwright-mcp \
-        /opt/local_servers/servers \
-        /opt/local_servers/youtube-mcp-server; do \
-    ( [ -f "$dir/package.json" ] && \
-        echo "=== npm: $dir ===" && cd "$dir" && npm install && (npm run build 2>/dev/null || true) ) & \
-done && wait
+# Build the Node.js MCP servers one at a time: `npm ci` installs exactly what a
+# server's package-lock.json pins (`npm install` for the two without one), then
+# `npm run build`. Any failure stops the image build with an error naming the
+# server. (They used to install in parallel into one npm cache, where two npm
+# processes can pick the same temporary file and both fail, and `|| true` and a
+# bare `wait` dropped every failure, so an image could ship without a server.)
+RUN set -e; \
+    for server in \
+        12306-mcp \
+        Calendar-Autoauth-MCP-Server \
+        filesystem \
+        google-forms-mcp \
+        HowToCook-mcp \
+        mcp-canvas-lms \
+        mcp-npx-fetch \
+        playwright-mcp \
+        servers \
+        youtube-mcp-server \
+        woocommerce-mcp \
+        notion-mcp-server; do \
+        echo "=== npm: $server ==="; \
+        cd "/opt/local_servers/$server"; \
+        if [ -f package-lock.json ]; then install=ci; else install=install; fi; \
+        npm "$install" --no-audit --no-fund \
+            || { echo "ERROR: MCP server $server: npm $install failed" >&2; exit 1; }; \
+        npm run build \
+            || { echo "ERROR: MCP server $server: npm run build failed" >&2; exit 1; }; \
+    done
 
-# Install the browser for the Node Playwright MCP package, not just the Python
-# playwright package in /opt/venv. Otherwise browser_install tries to download
-# at runtime, which is slow and often unavailable on HPC nodes.
+# Install the browser for the Node Playwright MCP package. Otherwise
+# browser_install tries to download at runtime, which is slow and often
+# unavailable on HPC nodes.
 RUN cd /opt/local_servers/playwright-mcp && npm run build && \
     node --max-old-space-size=96 --test tests/runtime-limits.mjs && \
     npx playwright install chromium
 
-# These servers need pg for their Toolathlon PG-backed forks
-RUN cd /opt/local_servers/woocommerce-mcp && npm install pg @types/pg && npm run build
-RUN cd /opt/local_servers/notion-mcp-server && npm install pg @types/pg && npm run build
-
-# Build Python MCP servers (parallel)
-RUN for dir in \
-        /opt/local_servers/arxiv-mcp-server \
-        /opt/local_servers/arxiv-latex-mcp \
-        /opt/local_servers/yahoo-finance-mcp \
-        /opt/local_servers/emails-mcp \
-        /opt/local_servers/mcp-google-sheets \
-        /opt/local_servers/mcp-snowflake-server \
-        /opt/local_servers/mcp-scholarly \
-        /opt/local_servers/Office-Word-MCP-Server \
-        /opt/local_servers/Office-PowerPoint-MCP-Server \
-        /opt/local_servers/excel-mcp-server \
-        /opt/local_servers/pdf-tools-mcp \
-        /opt/local_servers/mcp-youtube-transcript \
-        /opt/local_servers/cli-mcp-server; do \
-    ( [ -f "$dir/pyproject.toml" ] && \
-        echo "=== uv: $dir ===" && cd "$dir" && uv sync 2>/dev/null || true ) & \
-done && wait
-
-# yahoo-finance Toolathlon fork uses psycopg2 for PG-backed data
-RUN cd /opt/local_servers/yahoo-finance-mcp && uv add psycopg2-binary
+# Build the Python MCP servers one at a time with `uv sync --locked`, which
+# installs what each uv.lock pins and fails if a lock no longer matches its
+# pyproject.toml. Any failure stops the image build with an error naming the
+# server. Preferring system interpreters keeps every server on the Python it got
+# from the parallel build this replaces (no uv-managed Python was installed yet
+# when each server picked one); a server whose .python-version the system lacks
+# still gets a uv-managed interpreter.
+RUN set -e; \
+    for server in \
+        arxiv-mcp-server \
+        arxiv-latex-mcp \
+        yahoo-finance-mcp \
+        emails-mcp \
+        mcp-google-sheets \
+        mcp-snowflake-server \
+        mcp-scholarly \
+        Office-Word-MCP-Server \
+        Office-PowerPoint-MCP-Server \
+        excel-mcp-server \
+        pdf-tools-mcp \
+        mcp-youtube-transcript \
+        cli-mcp-server; do \
+        echo "=== uv: $server ==="; \
+        cd "/opt/local_servers/$server"; \
+        UV_PYTHON_PREFERENCE=system uv sync --locked \
+            || { echo "ERROR: MCP server $server: uv sync --locked failed" >&2; exit 1; }; \
+    done
 
 # Normalize any uv-managed python aliases to RELATIVE symlinks. The Python MCP
 # sub-servers run via `uv run`, which may create per-server venvs against a
@@ -135,6 +147,16 @@ RUN base="$HOME/.local/share/uv/python"; \
             if [ "$gen" != "$v" ]; then ln -sfn "$v" "$base/$gen"; fi; \
         done; \
     fi
+
+# Fail here, naming the server, if any server in configs/mcp_servers lacks its
+# entry point after the builds above: the built script, or the project venv and
+# command its launch runs. The list comes from the configs that discovery and
+# server.py launch, so a server added there is checked without editing this.
+# (2>&1 keeps the error after the per-server lines, at the end of the log that a
+# failed step shows; BuildKit can reorder stdout and stderr written together.)
+COPY configs/ /app/configs/
+COPY discover_tools.py /app/discover_tools.py
+RUN python3 /app/discover_tools.py --check-entry-points 2>&1
 
 # Create the eigent superuser (peer auth as the postgres OS user).
 USER postgres
@@ -168,12 +190,10 @@ RUN PG_CONF=$(find /etc/postgresql -name postgresql.conf) && { \
 # Copy project files
 WORKDIR /app
 COPY tasks/ /app/tasks/
-COPY configs/ /app/configs/
 COPY db/ /app/db/
 COPY runtime_patches/ /app/runtime_patches/
 COPY server.py /app/server.py
 COPY http_fixtures.py task_setup.py task_process.py /app/
-COPY discover_tools.py /app/discover_tools.py
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
@@ -191,7 +211,7 @@ RUN service postgresql start && \
     gunzip -c /app/db/init.sql.gz | psql -U eigent -d toolathlon_template -v ON_ERROR_STOP=1 && \
     psql -U eigent -d toolathlon_template -v ON_ERROR_STOP=1 -f /app/db/normalize_wc_categories.sql && \
     PGHOST=localhost PGDATABASE=toolathlon_template PG_DATABASE=toolathlon_template \
-        python3 /app/discover_tools.py && \
+        python3 /app/discover_tools.py 2>&1 && \
     psql -U eigent -d postgres -c "UPDATE pg_database SET datistemplate = true WHERE datname = 'toolathlon_template';" && \
     service postgresql stop
 
